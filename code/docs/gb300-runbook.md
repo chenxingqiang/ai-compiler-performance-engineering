@@ -136,6 +136,18 @@ sm_103a and runs the NVFP4 tensor cores correctly (the MMA atom above is the FP4
 tensor-core op), so the "utilize the latest hardware" box is checked; the residual
 gap is occupancy at decode-M.
 
+Companion data point, the repo's own hand-written tcgen05 dense GEMM
+(`ch10:matmul_tcgen05_vs_cublas`, the educational CUDA-C++ tcgen05 kernel): on
+GB300 it measures ~4x SLOWER than cuBLAS (baseline custom-tcgen05 2.78 ms,
+optimized cuBLAS = best_speedup 4.0x), i.e. ~25% of the vendor library. In
+K/R/H/P/A terms the educational kernel is K3 / R4 (CUDA C++ + tcgen05) / H4 / P2
+(~25% of SoTA) and cuBLAS is P4 (SoTA). That 4x gap is the lab's intended lesson (a
+hand-written tensor-core kernel vs the tuned vendor library), not a fixable defect,
+and it is consistent across the tcgen05 teaching kernels (`matmul_tcgen05_epilogue`
+is 1.27x over its own naive baseline). The two frontier GEMM SoL reads together:
+the vendor NVFP4 path is occupancy-bound at decode-M (right kernel, shape-limited),
+and the educational tcgen05 path is P2-vs-P4 off cuBLAS by design.
+
 Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
 (`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
 report their OWN internal kernel timing; a wall-clock probe of `benchmark_fn`
