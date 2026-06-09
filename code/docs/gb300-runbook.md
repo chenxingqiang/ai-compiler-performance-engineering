@@ -139,11 +139,28 @@ fundamental GB300 problems:
   sm_120/121 but NO sm_103* at all; (4) forcing `CUTE_DSL_ARCH=sm_100f` (the
   family target that runs across SM10x) passes arch validation but the NVFP4
   blockscaled MMA op `MmaMXF4NVF4Op` is hardcoded to require `sm_100a` (arch-locked
-  to sm_100, will not load on sm_103) and rejects sm_100f. So there is no DSL-4.3.0
-  arch that both drives the NVFP4 MMA op AND runs on sm_103. Fix: upgrade
-  `nvidia-cutlass-dsl` to a version with Blackwell-Ultra (sm_103a) support. Note
-  the asymmetry: the C++ CUTLASS path (the `nvfp4_*_sm103` binaries, nvcc
-  `-arch=sm_103a`) DOES support sm_103a and works; only the Python DSL JIT lags.
+  to sm_100, will not load on sm_103) and rejects sm_100f. So   there is no DSL-4.3.0
+  arch that both drives the NVFP4 MMA op AND runs on sm_103. Note the asymmetry:
+  the C++ CUTLASS path (the `nvfp4_*_sm103` binaries, nvcc `-arch=sm_103a`) DOES
+  support sm_103a and works; only the Python DSL JIT lags.
+
+  COMPLETE FIX (validated path, 3 parts):
+  1. cutlass-dsl: `nvidia-cutlass-dsl[cu13]>=4.5.2`. Confirmed in source that
+     4.5.2 adds `sm_103`/`sm_103a`/`sm_103f` to the `Arch` enum (4.3.0/4.4.2 lack
+     them). The `[cu13]` extra pulls the CUDA-13 backend. requirements_latest.txt
+     updated. (Installed 4.5.2[cu13] on the validation pod; the inventory loop
+     stayed healthy on it.)
+  2. The matched example: cutlass main ships an sm_103-specific
+     `examples/python/CuTeDSL/cute/blackwell/kernel/blockscaled_gemm/sm103_dense_blockscaled_gemm_persistent.py`.
+     The pinned v4.1.0 submodule example uses `cute.arch.ProxyKind` (removed in
+     4.5.x) and the `Sm100BlockScaledPersistentDenseGemmKernel` class, so it must
+     be replaced with the sm103 example (bump/vendor; re-validate the C++
+     tcgen05/nvfp4 header path, which currently works on v4.1.0-39).
+  3. `labs/block_scaling/block_scaling_common.py` `build_problem` must move from
+     the `Sm100BlockScaledPersistentDenseGemmKernel` API to the sm103 example's
+     `Sm103BlockScaledPersistentDenseGemmKernel` / `Sm103BlockScaledBasicChunk` /
+     `sm103_make_smem_layout_*` API (a real port to the 4.5.x CuTe-DSL API).
+  Part 1 is done; parts 2-3 are a lab port coupled to a submodule bump.
 - `llama` optimized: Triton 3.7 (NGC) vs pinned 3.5.0 (above).
 The repo's actual GB300 kernels (tcgen05, NVFP4 GEMM, MoE, blackwell_matmul) are
 validated working; running on the repo-pinned toolchain (Triton 3.5.0 + a

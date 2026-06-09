@@ -41,8 +41,12 @@ dash==3.2.0
 cuda-python==13.0.3
 kvikio-cu13==25.10.0
 
-# CUTLASS backend for torch.compile (includes Python API and C++ headers)
-nvidia-cutlass-dsl==4.3.0
+# CUTLASS backend for torch.compile (includes Python API and C++ headers).
+# Use the [cu13] extra and >=4.5.2: 4.5.x adds the Blackwell Ultra arches
+# (sm_103/sm_103a/sm_103f) to the CuTe-DSL Arch enum, and the [cu13] extra pulls
+# the CUDA-13 backend libs. 4.3.0 (base-only) lacks sm_103a, so the Python
+# CuTe-DSL JIT labs (e.g. labs/block_scaling) cannot target GB300/sm_103.
+nvidia-cutlass-dsl[cu13]>=4.5.2
 
 # Development workflow
 jupyter==1.1.1
