@@ -521,6 +521,17 @@ SoL framing (B), measured 2026-06-09:
   the residual gap to ~90% is the single-tile barrier serialization + Long Scoreboard smem latency; a
   double-buffered multi-tile TMA pipeline could close it but is smem-limited (32 KB/block -> 6
   blocks/SM, and double-buffering lowers occupancy), so the EV is uncertain.
+- Memory (B4), optimized_hbm_copy: two stacked limiters found by the same Phase-5 hunt. (1) The grid
+  was hardcoded `<<<256, 256>>>` = ~1.7 blocks/SM on a 152-SM GB300, leaving the machine nearly empty.
+  Sizing it to the device (num_sms*32) raised achieved occupancy from ~20% to 90% (ncu). (2) But BW
+  rose only 60% -> 63.5% HBM SoL, because ncu at 90% occupancy shows DRAM 63.6% / SM 11.75%: the
+  kernel is now memory-subsystem-limited by its "Float8 / 256-bit" access (each element is 2x LDG.128 +
+  a load-store dependency), NOT occupancy. The float4 / 128-bit path (optimized_float4_vector) reaches
+  89.8% on the same device, so on GB300 the native 128-bit LDG.128 is the HBM-optimal width and the
+  256-bit Float8 premise this file teaches is empirically suboptimal. Kept the device-grid fix (correct
+  + maxes occupancy, 1.06x); the width is left as a teaching-premise observation (hbm_copy vs
+  float4_vector form a width comparison; 128-bit wins on GB300), flagged for the author rather than
+  silently rewritten.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,

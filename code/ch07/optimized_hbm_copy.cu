@@ -45,12 +45,20 @@ int main() {
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
-    
+
+    // Size the grid to the device. A fixed 256-block grid leaves a ~148-SM GB300 almost
+    // empty (~1.7 blocks/SM), so the grid-stride copy never has enough in-flight requests
+    // to saturate HBM. Many resident waves per SM expose enough memory-level parallelism.
+    int num_sms = 0;
+    CUDA_CHECK(cudaDeviceGetAttribute(&num_sms, cudaDevAttrMultiProcessorCount, 0));
+    const int threads = 256;
+    const int blocks = num_sms * 32;
+
     const int iterations = 100;
     CUDA_CHECK(cudaEventRecord(start));
     for (int i = 0; i < iterations; i++) {
         NVTX_RANGE("compute_kernel:hbm_copy");
-        hbm_copy<<<256, 256>>>(d_dst, d_src, n_vec8);
+        hbm_copy<<<blocks, threads>>>(d_dst, d_src, n_vec8);
         CUDA_CHECK_LAST_ERROR();
     }
     CUDA_CHECK(cudaEventRecord(stop));
