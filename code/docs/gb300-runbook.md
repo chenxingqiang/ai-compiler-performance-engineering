@@ -630,13 +630,34 @@ hardware_key `4x_gb300`), one per chapter/lab scope, each carrying the baseline 
 best-optimization timing/speedup/memory + throughput metrics. The chapter +
 moe + occupancy re-validations updated their entries failed -> pass.
 
-## One-shot pinned-env build (resolves the whole toolchain/dep class at once)
+## Toolchain GB300-readiness (verified 2026-06-09) -- the pinned torch is NOT the GB300 path
+
+Two verified facts that correct the naive "just build the pinned env" recommendation:
+
+1. NO torch build ships a NATIVE sm_103 cubin yet. The NGC torch 2.12 `arch_list` is
+   `[sm_80, sm_86, sm_90, sm_100, sm_110, sm_120, compute_120]` -- it runs on the GB300
+   (device cc 10.3 = sm_103) via FORWARD-COMPAT (sm_100 SASS + `compute_120` PTX JIT),
+   not a native sm_103 cubin. This is exactly why torch's own ops serve fine on GB300
+   while the custom CUDA kernels needed explicit `sm_103a` gencode (the `a` cubins are
+   arch-locked; torch's are forward-compatible). For a perf book this is worth stating:
+   torch kernels on GB300 are PTX-JIT'd from `compute_120`, not sm_103-native.
+
+2. The repo's pinned `torch==2.9.1+cu130` does NOT cleanly install+import on the GB300
+   pod's Python 3.12: a fresh venv `pip install torch==2.9.1+cu130` (cu130 index)
+   fails at import with `ModuleNotFoundError: No module named 'torch._opaque_base'`
+   (the module is genuinely absent from that wheel). So the validated GB300 toolchain
+   is the NGC torch 2.12 image, NOT the pinned 2.9.1 -- the 2.9.1 pin is the
+   B200/baseline era. A clean GB300 from-scratch env should base on torch 2.12+
+   (CUDA 13, sm_100 + compute_120) and keep triton 3.5.0 (which JITs the sm_103
+   `tcgen05` kernels cleanly, unlike the NGC triton 3.7 -- see the max-autotune class).
+
+## One-shot env build (resolves the whole toolchain/dep class at once)
 
 Every remaining non-arch issue (the Triton-3.7 `tcgen05` max-autotune/raw-kernel
-class, the transformers/flashinfer/vllm dep gaps) is a consequence of running on the
-NGC base image instead of the repo's pinned toolchain. Building from
-`requirements_latest.txt` (torch 2.9.1+cu130, triton 3.5.0, transformers, flashinfer,
-vllm, ...) instead of layering on NGC resolves all of them in one step: triton 3.5.0
-JITs the `tcgen05` kernels cleanly (no max-autotune fallback or skip-guard needed),
-and every dep is present (no env-gap skips). On that env, only the GB300-arch source
-fixes in this doc (items 1-8) are required.
+class, the transformers/flashinfer/vllm dep gaps) is a consequence of the NGC base
+image's specific versions, not the repo source. The clean GB300 env = NGC-style
+torch 2.12+ (the working forward-compat base, per fact 1+2 above) + triton 3.5.0
+(clean sm_103 `tcgen05` JIT) + the rest of `requirements_latest.txt` deps
+(transformers, flashinfer, vllm, ...) so there are no dep-gap skips. On that env,
+only the GB300-arch source fixes in this doc (items 1-8) are required. Do NOT expect
+the pinned torch 2.9.1 to be the GB300 base (fact 2).
