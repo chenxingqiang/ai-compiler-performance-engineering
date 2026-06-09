@@ -507,9 +507,13 @@ separate methodology bug: optimized_cublaslt_gemm_fp16 lacked the warmup that ba
 has, so the optimized was timed COLD against the warm baseline (under-reporting it, 0.0126 ms). The
 auto-tune supplies the missing warmup, so it is now matched warm-vs-warm: 0.0097 ms, accurate harness
 speedup 152.58x, verification green. So the auto-tune lever is FP4-specific; on mature dtypes its value
-is confirming rank-0 (and, for FP16, restoring matched-warm methodology). The generic gemm + ch19
-fp4_hardware remain (generic is mature -> expect rank-0; ch19 is FP4 single-matrix -> auto-tune may
-help).
+is confirming rank-0 (and, for FP16, restoring matched-warm methodology). ch19 fp4_hardware (FP4,
+single-matrix) CONFIRMS the FP4-path theory: auto-tune picks non-rank-0 candidates (#2/#5), ~1.03-1.12x
+faster (TIME_MS 0.00518 -> ~0.00462-0.00503; the selection varies run-to-run on this small fast kernel
+with the short 3-iter tuning timing, but it is never worse than rank-0), harness green. So the pattern
+is clean: the auto-tune lever wins on FP4 paths (ch09 FP4 GEMM +7.1%, ch19 fp4_hardware ~1.1x) and
+confirms rank-0 on mature paths (FP8/FP16). The generic FP32/FP16 gemm (mature) is banked as
+expect-rank-0.
 
 ## GB300 validated wins summary (consolidated, 2026-06-09)
 

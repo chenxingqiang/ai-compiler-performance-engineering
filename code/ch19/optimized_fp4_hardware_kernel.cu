@@ -211,17 +211,51 @@ int main(int argc, char** argv) {
     CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
                                                          &workspaceSize, sizeof(workspaceSize)));
 
-    cublasLtMatmulHeuristicResult_t heuristicResult = {};
+    constexpr int kMaxAlgos = 8;
+    cublasLtMatmulHeuristicResult_t heuristicResults[kMaxAlgos] = {};
         NVTX_RANGE("compute_math");
     int returnedResults = 0;
     cublasStatus_t heuristicStatus = cublasLtMatmulAlgoGetHeuristic(
         ltHandle, matmulDesc, layoutA, layoutB, layoutC, layoutC,
-        preference, 1, &heuristicResult, &returnedResults);
+        preference, kMaxAlgos, heuristicResults, &returnedResults);
     
     if (heuristicStatus != CUBLAS_STATUS_SUCCESS || returnedResults == 0) {
         std::cerr << "No cuBLASLt NVFP4 algorithm found (status=" << heuristicStatus
                   << ", returnedResults=" << returnedResults << ")." << std::endl;
         return 1;
+    }
+
+    // Auto-tune over the returned candidates: rank-0 is not always fastest, especially on the
+    // newer NVFP4 path (the ch09 FP4 GEMM saw candidate #3/#4 beat #0).
+    const cublasLtMatmulAlgo_t* bestAlgo = &heuristicResults[0].algo;
+    {
+        auto run_lt = [&](const cublasLtMatmulAlgo_t* algo) {
+            CUBLASLT_CHECK(cublasLtMatmul(ltHandle, matmulDesc, &alpha,
+                                          d_A, layoutA, d_B, layoutB, &beta,
+                                          d_C, layoutC, d_C, layoutC,
+                                          algo, d_workspace, workspaceSize, stream));
+        };
+        cudaEvent_t ts, te;
+        CUDA_CHECK(cudaEventCreate(&ts));
+        CUDA_CHECK(cudaEventCreate(&te));
+        int bestIdx = 0;
+        float bestMs = 1e30f;
+        for (int a = 0; a < returnedResults; ++a) {
+            run_lt(&heuristicResults[a].algo);
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            CUDA_CHECK(cudaEventRecord(ts, stream));
+            for (int w = 0; w < 3; ++w) run_lt(&heuristicResults[a].algo);
+            CUDA_CHECK(cudaEventRecord(te, stream));
+            CUDA_CHECK(cudaEventSynchronize(te));
+            float ms = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&ms, ts, te));
+            if (ms < bestMs) { bestMs = ms; bestIdx = a; }
+        }
+        CUDA_CHECK(cudaEventDestroy(ts));
+        CUDA_CHECK(cudaEventDestroy(te));
+        bestAlgo = &heuristicResults[bestIdx].algo;
+        std::cout << "FP4 hardware GEMM: auto-tuned over " << returnedResults
+                  << " candidates, selected #" << bestIdx << std::endl;
     }
 
     // Warmup
@@ -230,7 +264,7 @@ int main(int argc, char** argv) {
         CUBLASLT_CHECK(cublasLtMatmul(ltHandle, matmulDesc, &alpha,
                                        d_A, layoutA, d_B, layoutB, &beta,
                                        d_C, layoutC, d_C, layoutC,
-                                       &heuristicResult.algo, d_workspace, workspaceSize, stream));
+                                       bestAlgo, d_workspace, workspaceSize, stream));
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -246,7 +280,7 @@ int main(int argc, char** argv) {
         CUBLASLT_CHECK(cublasLtMatmul(ltHandle, matmulDesc, &alpha,
                                        d_A, layoutA, d_B, layoutB, &beta,
                                        d_C, layoutC, d_C, layoutC,
-                                       &heuristicResult.algo, d_workspace, workspaceSize, stream));
+                                       bestAlgo, d_workspace, workspaceSize, stream));
     }
     CUDA_CHECK(cudaEventRecord(stop, stream));
     CUDA_CHECK(cudaEventSynchronize(stop));
