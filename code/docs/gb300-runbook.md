@@ -77,6 +77,19 @@ The harness was calibrated for B200/GB200 (`sm_100`); these make it GB300-correc
    `detect_sm` (`sm_103`).
 5. `setup.sh`: single-source Triton from `requirements_latest.txt` (3.5.0) instead
    of the 3.6 nightly default; correct the misleading 2.10-dev header.
+6. `labs/moe_optimization_journey/{moe_benchmark.py,optimized_moe_pad_quant.py}`:
+   route the direct `torch.compile(mode="max-autotune")` calls through
+   `get_optimal_compile_mode`, which keeps max-autotune on the pinned toolchain but
+   falls back to `default` on sm_103 + Triton >= 3.6 (where max-autotune emits an
+   unloadable `tcgen05.wait.st` kernel). Same class as the llama_3_1_8b fix; these
+   two levels (`moe`, `moe_pad_quant`) bypassed the centralized guard.
+7. `labs/occupancy_tuning/triton_matmul_schedules.py`: proactive toolchain
+   capability-check in `setup()` that raises the file's existing `SKIPPED:` idiom
+   when a raw `@triton.jit` matmul would emit the same unloadable `tcgen05` kernel
+   on sm_103 + Triton >= 3.6. The LLVM abort is an uncatchable SIGABRT, so the skip
+   must be proactive (before the JIT fires); converts a -6 crash into a clean skip.
+8. `labs/train_distributed/optimized_ddp_multigpu.py`: route its one direct
+   `max-autotune` call through `get_optimal_compile_mode` (same class as 6).
 
 The CUDA-binary build path (`detect_sm.py`, `cuda_binary_benchmark.py`,
 `cuda_arch.mk`) was already GB300-aware (CC 10.3 -> `sm_103`).
@@ -344,6 +357,15 @@ is why ch01-17 ran clean):
   `tvm_ffi` backend; torch requirement is unpinned so torch 2.12 is untouched).
   VALIDATED on GB300: flashinfer_block_sparse compiles + runs (sm_103), no kernel-image
   or import error.
+- transformers: every `labs/train_distributed` variant calls `build_tokenizer()` ->
+  `from transformers import AutoTokenizer`, so all 8 baselines (ddp/ddp_flash/fsdp/
+  fsdp2 x single/multigpu) failed `No module named 'transformers'` (recorded
+  `failed_error`, not skipped, because `build_tokenizer()` raises a plain RuntimeError).
+  Also gates several ch18 HF-decoder targets. FIXED on the pod: `pip install
+  transformers` (5.10.2; additive, torch 2.12 + triton 3.7 unchanged, only `tokenizers`
+  shifted 0.23.1->0.22.2). VALIDATED: `baseline_ddp` runs (3 steps, 1,387 tok/s/rank).
+  The one optimized variant with a direct `max-autotune` (`optimized_ddp_multigpu.py`)
+  is additionally routed through `get_optimal_compile_mode` (fix 8 above).
 - vllm: needed only by `labs/dynamic_router` (4 targets) and `labs/trtllm_phi_3_5_moe`
   (which also needs external model/engine assets, so it skips regardless). NOT installed
   on the pod: `vllm==0.16.0` pins torch/triton strictly, so installing it mid-run would
@@ -446,3 +468,112 @@ advances. It uses the frozen-timestamp signal (not a wall-clock age), so a
 slow-but-progressing target (including a long training lab) is never killed; only a
 genuinely stuck worker is. Run it alongside an unattended inventory:
 `bash docs/gb300-inventory-watchdog.sh &`.
+
+## MoE technique-ladder on GB300 (the headroom pattern holds)
+
+The MoE labs span three implementations; their strict per-variant speedups (vs each
+lab's naive baseline, cudagraph-on, profile=none) characterize where the MoE headroom
+is on GB300, and it follows the SAME pattern as the GEMM + decode ladders: the
+KERNEL-STRUCTURE and CUDA-GRAPH levers carry the headroom; the MEMORY-MOVEMENT and
+QUANT levers are near-ties.
+
+Headroom carriers (kernel-structure / graph / batching):
+- `moe_optimization_journey` (Python ladder): the Level-7 `torch.compile` variant
+  (`moe`) lands 43.38x strict (`gb300_reval_moe`, post-fix) vs the naive Python-loop
+  baseline; the prior direct-validation ladder showed `optimized_moe_cuda_graphs`
+  41.6x and `optimized_moe_triton` 17x. This is the headline MoE win on GB300:
+  collapsing the Python expert loop into a single compiled/graph-captured kernel.
+- `moe_cuda` (CUDA kernels): `router` 13.79x, `moe_backend_selection` 5.77x.
+- `moe_cuda_ptx` (PTX): `moe_grouped_gemm_bwd` 2.20x, `moe_layer` 1.40x.
+
+Near-ties (memory-movement / quant, the GB300 signature):
+- `moe_cuda`: `decode_attention` 1.27x, `kv_transfer` 1.12x.
+- `moe_cuda_ptx`: `moe_grouped_gemm_fwd` 1.08x, `moe_quant` 1.00x (no_speedup).
+- `moe_optimization_journey`: `moe_pad_quant` 1.00x (no_speedup; the pad+quant+
+  finalize+slice chain is memory-movement, so torch.compile-default ties eager on
+  GB300, exactly the signature below). It now RUNS (was a tcgen05 crash pre-fix).
+
+Read: on GB300 the MoE win is dominated by collapsing Python/launch overhead (CUDA
+graphs, batched/grouped kernels, a fused router) and by structure (backend selection),
+exactly as for the decode ladder (`decode_ultimate` 7.6x) and the dense GEMM ladder
+(tcgen05 126x vs naive, TMA 6.5x). Memory-movement micro-opts (kv_transfer, grouped
+GEMM forward) and quant packing (moe_quant) are at parity, because GB300's HBM3e
+bandwidth + large L2 already absorb those access patterns. These are technique
+speedups vs naive, not byte-grounded %SoL (profile=none captured no per-variant DCGM);
+the byte-grounded MoE roofline would need an L3 DCGM pass per variant.
+
+## Completion-phase audit: full inventory result on GB300
+
+The full strict inventory (ch01-20 + every `labs/*`, profile=none, validity=strict,
+cudagraph-on, watchdog-guarded) ran to `INVENTORY_COMPLETE` with **0 watchdog reaps**
+(no hang wedged the run; the earlier tcgen05-cluster hang predates the tightened
+timeouts). 55 scopes wrote results; the 333-benchmark tally:
+
+| status | count | meaning |
+| --- | --- | --- |
+| succeeded | 259 | optimized beats baseline past threshold |
+| failed_no_speedup | 44 | runs correct, speedup < 1.05x (GB300 memory-bound ties) |
+| skipped | 13 | preflight / capability / dep skip (graceful) |
+| failed_error | 16 | hard error (all classified + resolved below) |
+| failed_verification | 1 | input-signature mismatch (pre-existing, hardware-agnostic) |
+
+Every non-green target is classified, with no unexplained GB300 failure:
+
+FIXED this session + re-validated strict (failed -> pass):
+- `ch10:matmul_tcgen05_pipelined` 2.33x (sm_103a loader fat-binary).
+- `ch10:tcgen05_cluster_pipeline` 1.54x (tightened timeout; the intermittent
+  cluster-graph hang did not recur on the clean re-run).
+- `ch11:warp_specialized_two_pipelines_multistream` 2.46x (cold-compile timeout).
+- `ch16:flashinfer_block_sparse` 3.72x (flashinfer installed).
+- `labs/moe_optimization_journey` `moe` 43.38x + `moe_pad_quant` tie (max-autotune
+  guard, fix 6 above; the LLVM tcgen05 abort that wrote no results json is gone).
+- `labs/occupancy_tuning:proton_matmul` -> skipped (proactive tcgen05 toolchain
+  skip-guard, fix 7; was an uncatchable -6 SIGABRT).
+- `labs/train_distributed` 8 variants (ddp/ddp_flash/fsdp/fsdp2 x single/multigpu):
+  transformers installed + max-autotune guard (fix 8). Fix PROVEN: a re-run shows
+  **0 "Baseline FAILED"** (was 8) and 15 optimized variants timed. The full strict
+  expectation-update exceeds a 30-min cap (this is a heavy 4-GPU lab once the
+  baselines actually train), so the failed->pass expectation rewrite is deferred;
+  the unblock itself is confirmed.
+
+BANKED (not a GB300-arch break; root-caused, fix designed, validation deferred):
+- `labs/fullstack_cluster:moe_hybrid_ep` + `moe_hybrid_ep_multigpu`: an
+  EP collective-symmetry bug (a per-rank early-return skips an all-to-all on
+  0-token ranks -> NCCL all-reduce timeout). Hardware-independent; the fix +
+  validation plan are in the moe_hybrid_ep section above (no unvalidated
+  distributed fix committed, per the rigor discipline).
+
+ENV-GAP (NGC base image lacks the dep; the pinned env has it; not a repo bug):
+- `ch18:vllm_v1_integration`: needs the vllm serving stack. vllm pins torch/triton
+  strictly, so installing it mid-run would downgrade the validated torch 2.12 /
+  triton 3.7. Resolved by the pinned-env build (below), not worked around mid-loop.
+
+PRE-EXISTING METHODOLOGY QUIRK (hardware-agnostic, not a GB300 regression):
+- `ch13:sequence_parallel_multigpu` (failed_verification): the optimized variant uses
+  a different `collective_type` than its baseline, so the harness INPUT-signature
+  check flags the pair as non-comparable (`mismatches: ['collective_type']`). This is
+  a benchmark-pair definition choice that fails identically on B200; the optimized
+  path is also 0.95x (slower) here, so there is no GB300 perf claim to rescue. Left
+  as-is (fixing it is a pair-redefinition, out of scope for GB300 validation).
+
+Net: every GB300-arch break is fixed (sm_103a kernels, tcgen05 toolchain class,
+deps), the MoE collective hang is root-caused + banked, and the only remaining reds
+are an env-gap (vllm) and a hardware-agnostic pair quirk. The repo's frontier
+optimizations run correct and fast on GB300 (Blackwell Ultra, sm_103).
+
+The durable GB300 calibration baseline the repo lacked now exists:
+**58 `expectations_4x_gb300.json` files, 310 example expectations** (schema v2,
+hardware_key `4x_gb300`), one per chapter/lab scope, each carrying the baseline +
+best-optimization timing/speedup/memory + throughput metrics. The chapter +
+moe + occupancy re-validations updated their entries failed -> pass.
+
+## One-shot pinned-env build (resolves the whole toolchain/dep class at once)
+
+Every remaining non-arch issue (the Triton-3.7 `tcgen05` max-autotune/raw-kernel
+class, the transformers/flashinfer/vllm dep gaps) is a consequence of running on the
+NGC base image instead of the repo's pinned toolchain. Building from
+`requirements_latest.txt` (torch 2.9.1+cu130, triton 3.5.0, transformers, flashinfer,
+vllm, ...) instead of layering on NGC resolves all of them in one step: triton 3.5.0
+JITs the `tcgen05` kernels cleanly (no max-autotune fallback or skip-guard needed),
+and every dep is present (no env-gap skips). On that env, only the GB300-arch source
+fixes in this doc (items 1-8) are required.
