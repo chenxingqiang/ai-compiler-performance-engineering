@@ -134,7 +134,8 @@ int main() {
         &workspace_bytes,
         sizeof(workspace_bytes)));
 
-    cublasLtMatmulHeuristicResult_t heuristic{};
+    constexpr int kMaxAlgos = 8;
+    cublasLtMatmulHeuristicResult_t heuristics[kMaxAlgos]{};
     int returnedResults = 0;
     CUBLASLT_CHECK(cublasLtMatmulAlgoGetHeuristic(
         ltHandle,
@@ -144,8 +145,8 @@ int main() {
         Cdesc,
         Cdesc,
         preference,
-        1,
-        &heuristic,
+        kMaxAlgos,
+        heuristics,
         &returnedResults));
     
 #if defined(CUBLASLT_ALGO_CAP_PROGRAMMATIC_DEPENDENT_LAUNCH)
@@ -156,7 +157,7 @@ int main() {
     if (returnedResults > 0) {
         cublasStatus_t pdl_status = cublasLtMatmulAlgoGetAttribute(
             ltHandle,
-            &heuristic.algo,
+            &heuristics[0].algo,
             CUBLASLT_ALGO_CAP_PROGRAMMATIC_DEPENDENT_LAUNCH,
             &pdl_supported,
             sizeof(pdl_supported),
@@ -173,6 +174,37 @@ int main() {
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
+
+    // Auto-tune over the returned candidates (rank-0 is not always fastest); this also supplies the
+    // warmup this lab lacked (baseline_cublaslt_gemm warms up, so the optimized was timed cold).
+    const cublasLtMatmulAlgo_t* bestAlgo = &heuristics[0].algo;
+    if (returnedResults > 1) {
+        auto run_lt = [&](const cublasLtMatmulAlgo_t* algo) {
+            CUBLASLT_CHECK(cublasLtMatmul(ltHandle, operationDesc, &alpha, d_A, Adesc, d_B, Bdesc,
+                                          &beta, d_C, Cdesc, d_C, Cdesc, algo, workspace, workspace_bytes, 0));
+        };
+        cudaEvent_t ts, te;
+        CUDA_CHECK(cudaEventCreate(&ts));
+        CUDA_CHECK(cudaEventCreate(&te));
+        int bestIdx = 0;
+        float bestMs = 1e30f;
+        for (int a = 0; a < returnedResults; ++a) {
+            run_lt(&heuristics[a].algo);
+            CUDA_CHECK(cudaDeviceSynchronize());
+            CUDA_CHECK(cudaEventRecord(ts));
+            for (int w = 0; w < 3; ++w) run_lt(&heuristics[a].algo);
+            CUDA_CHECK(cudaEventRecord(te));
+            CUDA_CHECK(cudaEventSynchronize(te));
+            float ms = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&ms, ts, te));
+            if (ms < bestMs) { bestMs = ms; bestIdx = a; }
+        }
+        CUDA_CHECK(cudaEventDestroy(ts));
+        CUDA_CHECK(cudaEventDestroy(te));
+        bestAlgo = &heuristics[bestIdx].algo;
+        std::cout << "cuBLASLt GEMM: auto-tuned over " << returnedResults
+                  << " candidates, selected #" << bestIdx << std::endl;
+    }
 
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
@@ -195,7 +227,7 @@ int main() {
                 Cdesc,
                 d_C,
                 Cdesc,
-                &heuristic.algo,
+                bestAlgo,
                 workspace,
                 workspace_bytes,
                 0));

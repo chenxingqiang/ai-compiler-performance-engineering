@@ -512,8 +512,13 @@ single-matrix) CONFIRMS the FP4-path theory: auto-tune picks non-rank-0 candidat
 faster (TIME_MS 0.00518 -> ~0.00462-0.00503; the selection varies run-to-run on this small fast kernel
 with the short 3-iter tuning timing, but it is never worse than rank-0), harness green. So the pattern
 is clean: the auto-tune lever wins on FP4 paths (ch09 FP4 GEMM +7.1%, ch19 fp4_hardware ~1.1x) and
-confirms rank-0 on mature paths (FP8/FP16). The generic FP32/FP16 gemm (mature) is banked as
-expect-rank-0.
+confirms rank-0 on mature paths (FP8/FP16). The generic batched gemm: auto-tune picks a marginal #1
+(~1.03x) and also gets the matched-warm fix (it too lacked the baseline's warmup); harness green. So
+all 6 cuBLASLt matmul labs are now swept: FP4 GEMM (skip -> 706x, batched + auto-tune #3/#4), FP8
+(332x, batched), FP16 (152x, matched-warm), generic (marginal #1 + matched-warm), ch19 fp4_hardware
+(~1.1x, auto-tune #2/#5); perchannel is cuBLAS (different API). The durable lessons: (1) batch to fill
+the GPU when a single GEMM underfills it; (2) auto-tune the heuristic (rank-0 is best on mature dtypes
+but not the newer NVFP4 path); (3) warm BOTH arms for a matched A/B.
 
 ## GB300 validated wins summary (consolidated, 2026-06-09)
 
