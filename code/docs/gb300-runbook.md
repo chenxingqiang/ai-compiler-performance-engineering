@@ -361,6 +361,19 @@ single-node 4-GPU scale (their benefit is memory headroom at larger scale, not s
 distributed win cluster was ch04 (12 wins up to 40.44x); the train_distributed remainder is
 marginal and slow, so it is banked rather than chased.
 
+## Coverage audit complete (2026-06-09): the systematic gap was the distributed suite
+
+Final sliver check of the non-distributed "missing" targets confirms no further untested-runnable
+target hides a win. They resolve as: naming false-positives that did run under a `_cuda` key
+(ozaki_scheme as ozaki_scheme_cuda, nvfp4_gemm/gemv as `*_cuda`, ch12 with 12 recorded keys),
+user-submission template slots (nvfp4_*:submission, not benchmark pairs), or a graceful skip
+(moe_cuda:decode_kernel skips with "TMA optimized kernel not available"). The one systematic
+coverage gap was the torchrun-distributed suite the original sweep never launched, which ch04
+turned into 12 validated wins. With that closed and the non-distributed sliver verified, the
+GB300 coverage audit is complete: the breakthrough frontier is now a documented hard wall
+(perf-kernel at ceiling, env-gaps for vllm/nvshmem/multi-node-fabric/trtllm, and out-of-scope
+native sm_103 toolchain + production-scale kernels).
+
 Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
 (`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
 report their OWN internal kernel timing; a wall-clock probe of `benchmark_fn`
