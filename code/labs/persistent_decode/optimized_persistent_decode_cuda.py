@@ -40,7 +40,13 @@ def _load_extension() -> object:
             "--expt-relaxed-constexpr",
             "--expt-extended-lambda",
             "-DCUTE_ARCH_TCGEN05_TMEM_ENABLED",
+            # sm_100 (B200) SASS does not load on sm_103 (GB300). Match the sibling
+            # tma_extension.py / optimized_tma_prefill_decode.py arch set so the
+            # persistent decode kernel has a Blackwell-Ultra (sm_103) image too.
             "-gencode=arch=compute_100,code=sm_100",
+            "-gencode=arch=compute_103,code=sm_103",
+            "-gencode=arch=compute_120,code=sm_120",
+            "-gencode=arch=compute_121,code=sm_121",
         ] + [f"-I{p}" for p in include_dirs if p.exists()],
     )
 

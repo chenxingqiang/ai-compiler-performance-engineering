@@ -277,10 +277,26 @@ correct (12288^2), and `nvfp4_gemm` compiles + runs with no kernel-image error.
 The remaining four loaders use the identical gencode mechanism so the same fix
 applies; the loop exercises them in the labs phase (guarded by the watchdog below).
 
-Not fixed (intentionally): the ~24 nvfp4_dual_gemm competition-submission ARCHIVES
-(`top_submission_candidates/`, `modal697_candidates/`, `submission_*`, `cand_*`)
-carry the same latent hardcode but are reference variants the inventory does not
-run. Bulk-apply the same one-line gencode addition if any is ever activated.
+Comprehensive arch sweep (2026-06-09): scanned every lab `.py` for arch flags
+(`code=sm_100`/`sm_100a`, `gencode`, `TORCH_CUDA_ARCH`). Result, all ACTIVE CUDA
+targets now have an sm_103 image:
+- 6 loaders above: fixed (sm_103a / fat binary), validated end-to-end (all 6 labs run).
+- `persistent_decode/optimized_persistent_decode_cuda.py` (target
+  `persistent_decode_cuda`): was the LAST sm_100-only active target
+  (`code=sm_100`, no sm_103, no PTX -> no kernel image on GB300). Fixed to the
+  sibling arch set (sm_100/103/120/121) and validated (compiles + runs on sm_103).
+  Distinct from the `persistent_decode` target that already passed tier1.
+- Already GB300-ready (no change): `persistent_decode/tma_extension.py` +
+  `optimized_tma_prefill_decode.py` (sm_100/103/120/121),
+  `fullstack_cluster/capstone_extension.py` (sm_100+sm_103),
+  `blackwell_matmul/grace_blackwell_extension.py` (sm_103+sm_100+PTX, why
+  blackwell_matmul ran at 126x).
+
+Not fixed (intentionally): the nvfp4 competition-submission ARCHIVES
+(`top_submission_candidates/`, `modal697_candidates/`, `submission_*`, `cand_*`,
+`candidate_*`, the `optimized_submission_*cacheA*` variants) carry the same latent
+hardcode but have no `get_benchmark` (not run by the inventory). Bulk-apply the
+same one-line gencode addition if any is ever activated.
 
 ## GB300 hazard: intermittent tcgen05 cluster-graph hang + slow hang-detection
 
