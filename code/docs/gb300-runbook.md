@@ -129,12 +129,21 @@ flagged NVFP4 GEMM as "4.4 s / broken"; the real number is microseconds (above).
 ## Toolchain-version-skew note (important)
 The two remaining broken frontier targets are NGC base-image version skews, NOT
 fundamental GB300 problems:
-- `block_scaling`: cutlass submodule is `v4.1.0-39` but `nvidia-cutlass-dsl` is
-  4.3.0 (pinned). DSL 4.3.0 `convert_cute_tensor` marks `dim_order()[-1]` as the
-  leading dim and asserts it is contiguous; the v4.1.0 blockscaled example's L=1
-  tensor layout violates this (NVIDIA's own example fails identically). Fix: bump
-  the cutlass submodule to v4.3.0 to match the pinned DSL, then re-validate the
-  tcgen05/nvfp4 C++ header build path (currently works on v4.1.0-39).
+- `block_scaling`: the Python CuTe-DSL JIT path cannot target Blackwell Ultra on
+  the pinned `nvidia-cutlass-dsl 4.3.0`. Root-caused four layers deep on GB300:
+  (1) DSL `convert_cute_tensor` marks `dim_order()[-1]` as the leading dim, which
+  mispicks the L=1 batch dim (a stride==1 selection fixes it); (2) `cute.experimental`
+  is a stub that unconditionally raises, and DSL `get_version()` walk_packages
+  imports it and crashes (pre-stubbing `sys.modules['cutlass.cute.experimental']`
+  fixes it); (3) the DSL `Arch` enum has sm_100/100a/100f, sm_101*, sm_110*,
+  sm_120/121 but NO sm_103* at all; (4) forcing `CUTE_DSL_ARCH=sm_100f` (the
+  family target that runs across SM10x) passes arch validation but the NVFP4
+  blockscaled MMA op `MmaMXF4NVF4Op` is hardcoded to require `sm_100a` (arch-locked
+  to sm_100, will not load on sm_103) and rejects sm_100f. So there is no DSL-4.3.0
+  arch that both drives the NVFP4 MMA op AND runs on sm_103. Fix: upgrade
+  `nvidia-cutlass-dsl` to a version with Blackwell-Ultra (sm_103a) support. Note
+  the asymmetry: the C++ CUTLASS path (the `nvfp4_*_sm103` binaries, nvcc
+  `-arch=sm_103a`) DOES support sm_103a and works; only the Python DSL JIT lags.
 - `llama` optimized: Triton 3.7 (NGC) vs pinned 3.5.0 (above).
 The repo's actual GB300 kernels (tcgen05, NVFP4 GEMM, MoE, blackwell_matmul) are
 validated working; running on the repo-pinned toolchain (Triton 3.5.0 + a
