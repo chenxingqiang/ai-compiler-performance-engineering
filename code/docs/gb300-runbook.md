@@ -520,6 +520,15 @@ all 6 cuBLASLt matmul labs are now swept: FP4 GEMM (skip -> 706x, batched + auto
 the GPU when a single GEMM underfills it; (2) auto-tune the heuristic (rank-0 is best on mature dtypes
 but not the newer NVFP4 path); (3) warm BOTH arms for a matched A/B.
 
+Warmup-asymmetry audit (2026-06-09): after the cold-optimized-vs-warm-baseline bug surfaced in the
+FP16 + generic GEMM labs, all 27 optimized cuda-binary labs were scanned for it (does a kernel launch
+precede the first timed cudaEventRecord). It is NOT widespread: only those 2 cuBLASLt GEMMs had the
+asymmetry (their baselines warm up, their optimized did not), and both are fixed (matched-warm). Every
+other no-warmup optimized lab (hbm_copy, hbm_peak, lookup, add_cuda_parallel) is SYMMETRIC -- its
+baseline is also cold -- so the A/B speedup ratio is fair (cold/cold preserves the ratio). So the lab
+A/B speedups are measurement-fair across the suite; no further warmup fixes are warranted. A banked
+negative: the audit confirms measurement integrity rather than surfacing more fixes.
+
 ## GB300 validated wins summary (consolidated, 2026-06-09)
 
 The wins surfaced from previously-untested coverage on the 4-GPU GB300 node, all
