@@ -116,6 +116,18 @@ int main() {
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutA, CUDA_R_8F_E4M3, K, M, K));  // A^T dimensions for col-major
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutB, CUDA_R_8F_E4M3, N, K, N));  // B dimensions
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutC, CUDA_R_16F, N, M, N));       // Output in FP16
+    // Batch all kBatchCount matrices into ONE matmul. A single 4096^3 GEMM underfills the GPU
+    // (few output tiles -> poor wave occupancy); batching fills it (same lever as the FP4 lab).
+    const int batchCount = kBatchCount;
+    const long long strideA = (long long)K * M;   // elements per A matrix (FP8)
+    const long long strideB = (long long)N * K;   // elements per B matrix (FP8)
+    const long long strideC = (long long)N * M;   // elements per C matrix (FP16)
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutA, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutB, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutC, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutA, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideA, sizeof(strideA)));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutB, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideB, sizeof(strideB)));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutC, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideC, sizeof(strideC)));
 
     // Scaling factors for FP8
     float alpha = 1.0f;
@@ -134,32 +146,54 @@ int main() {
                                                          &workspaceSize,
                                                          sizeof(workspaceSize)));
 
-    // Query and select best algorithm
-    cublasLtMatmulHeuristicResult_t heuristicResult = {};
+    // Query the top-K candidate algorithms and auto-tune (time each, pick the fastest):
+    // cuBLASLt's first-ranked heuristic is not always the fastest for a given shape.
+    constexpr int kMaxAlgos = 8;
+    cublasLtMatmulHeuristicResult_t heuristicResults[kMaxAlgos] = {};
     int returnedResults = 0;
     CUBLASLT_CHECK(cublasLtMatmulAlgoGetHeuristic(ltHandle, matmulDesc, layoutA, layoutB, layoutC, layoutC,
-                                                   preference, 1, &heuristicResult, &returnedResults));
+                                                   preference, kMaxAlgos, heuristicResults, &returnedResults));
     if (returnedResults == 0) {
         std::cerr << "No suitable algorithm found for FP8 GEMM" << std::endl;
         return 1;
     }
 
-    // Warmup
-    for (int batch = 0; batch < kBatchCount; ++batch) {
-        NVTX_RANGE("compute_math:ltmatmul");
-        const size_t offset_A = batch * elements_A;
-        const size_t offset_B = batch * elements_B;
-        const size_t offset_C = batch * elements_C;
+    // One batched matmul over all kBatchCount matrices (col-major: operand A = d_B, operand B = d_A;
+    // cuBLASLt strides both operands and C per batch). Fills the GPU vs the old per-batch loop.
+    auto run_with = [&](const cublasLtMatmulAlgo_t* algo) {
         CUBLASLT_CHECK(cublasLtMatmul(ltHandle, matmulDesc,
-                                       &alpha,
-                                       d_B + offset_B, layoutB,
-                                       d_A + offset_A, layoutA,
-                                       &beta,
-                                       d_C + offset_C, layoutC,
-                                       d_C + offset_C, layoutC,
-                                       &heuristicResult.algo,
-                                       d_workspace, workspaceSize,
-                                       stream));
+                                       &alpha, d_B, layoutB, d_A, layoutA,
+                                       &beta, d_C, layoutC, d_C, layoutC,
+                                       algo, d_workspace, workspaceSize, stream));
+    };
+
+    // Auto-tune over the returned candidates: warmup + a few timed iters each, pick the fastest.
+    cudaEvent_t tstart, tstop;
+    CUDA_CHECK(cudaEventCreate(&tstart));
+    CUDA_CHECK(cudaEventCreate(&tstop));
+    int bestIdx = 0;
+    float bestMs = 1e30f;
+    for (int a = 0; a < returnedResults; ++a) {
+        run_with(&heuristicResults[a].algo);  // warmup
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(cudaEventRecord(tstart, stream));
+        for (int w = 0; w < 3; ++w) run_with(&heuristicResults[a].algo);
+        CUDA_CHECK(cudaEventRecord(tstop, stream));
+        CUDA_CHECK(cudaEventSynchronize(tstop));
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, tstart, tstop));
+        if (ms < bestMs) { bestMs = ms; bestIdx = a; }
+    }
+    CUDA_CHECK(cudaEventDestroy(tstart));
+    CUDA_CHECK(cudaEventDestroy(tstop));
+    const cublasLtMatmulAlgo_t* bestAlgo = &heuristicResults[bestIdx].algo;
+    std::cout << "FP8 GEMM: auto-tuned over " << returnedResults
+              << " candidate(s), selected #" << bestIdx << std::endl;
+
+    // Warmup
+    {
+        NVTX_RANGE("compute_math:ltmatmul");
+        run_with(bestAlgo);
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -170,23 +204,8 @@ int main() {
     // Timed section: Kernel execution only
     CUDA_CHECK(cudaEventRecord(start, stream));
     for (int iter = 0; iter < kIterations; ++iter) {
-        NVTX_RANGE("batch");
-        for (int batch = 0; batch < kBatchCount; ++batch) {
-            NVTX_RANGE("compute_math:ltmatmul");
-            const size_t offset_A = batch * elements_A;
-            const size_t offset_B = batch * elements_B;
-            const size_t offset_C = batch * elements_C;
-            CUBLASLT_CHECK(cublasLtMatmul(ltHandle, matmulDesc,
-                                           &alpha,
-                                           d_B + offset_B, layoutB,
-                                           d_A + offset_A, layoutA,
-                                           &beta,
-                                           d_C + offset_C, layoutC,
-                                           d_C + offset_C, layoutC,
-                                           &heuristicResult.algo,
-                                           d_workspace, workspaceSize,
-                                           stream));
-        }
+        NVTX_RANGE("compute_math:ltmatmul");
+        run_with(bestAlgo);
     }
     CUDA_CHECK(cudaEventRecord(stop, stream));
     CUDA_CHECK(cudaEventSynchronize(stop));

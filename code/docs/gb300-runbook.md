@@ -493,6 +493,13 @@ Verification preserved (checksum identical; harness green). So the full FP4 GEMM
 over the original passing lab, all at verified parity. Teaching point: benchmark the heuristic
 candidates; do not assume rank-0 is optimal.
 
+FP8 sibling (cublaslt_gemm_fp8): the same batched-fill lever applies (it too was single-matrix-looped
+with the first heuristic). Batching it: 3424 -> 3808 TFLOPS (1.11x), harness 332.90x vs baseline,
+verification green. Here the auto-tune CONFIRMS rank-0 is already fastest for FP8 (no extra gain,
+unlike FP4 where #3/#4 beat #0). The FP8 batched gain (1.11x) is smaller than FP4's (1.41x), plausibly
+because FP8 is more memory-bound (2x the operand bytes of FP4) so it underfills less severely at this
+shape (not ncu-confirmed). So both ch09 cuBLASLt GEMM labs now fill the GPU + auto-tune the algo.
+
 ## GB300 validated wins summary (consolidated, 2026-06-09)
 
 The wins surfaced from previously-untested coverage on the 4-GPU GB300 node, all
