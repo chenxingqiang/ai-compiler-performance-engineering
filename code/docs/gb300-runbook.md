@@ -432,7 +432,7 @@ verification-passed. Speedups are vs the lab's own naive/baseline arm (the book'
 | Win (chapter) | Speedup | Category | SoL note |
 | --- | --- | --- | --- |
 | nixl_tier_handoff (ch04) | 40.44x | comm, tiered transfer | 92.66 GB/s achieved vs 2.29 naive (measured) |
-| nccl (ch04) | 20.27x | comm, right-engine | NCCL vs naive; NVLink-bound |
+| nccl (ch04) | 20.27x | comm, right-engine | NCCL vs naive; small-message latency-bound (~0 NVLink BW measured) |
 | cpu_reduction (ch04) | 18.20x | comm, right-engine | GPU vs CPU reduction |
 | grace_blackwell_locality (ch04) | 8.89x | comm, routing | Grace-Blackwell C2C locality |
 | gradient_compression_int8 (ch04) | 2.16x (5.75x comm-only) | comm, volume-reduction | int8 grads |
@@ -442,7 +442,7 @@ verification-passed. Speedups are vs the lab's own naive/baseline arm (the book'
 | continuous_batching (ch04) | 3.07x | serving | |
 | dataparallel (ch04) | 2.68x | comm | |
 | warp_specialized_two_pipelines_multistream (ch11) | 2.36x | kernel | earlier timeout fix |
-| matmul_tcgen05_pipelined (ch10) | 2.32x | kernel, tcgen05 | below cuBLAS tensor-core SoL (P2 teaching) |
+| matmul_tcgen05_pipelined (ch10) | 2.32x | kernel, tcgen05 | 28.2% FP16 tensor-core SoL (measured: 1057 TFLOPS) |
 | tcgen05_cluster_pipeline (ch10) | 1.58x | kernel, tcgen05 | below cuBLAS tensor-core SoL (P2 teaching) |
 | nvlink_topology_aware (ch04) | 1.48x | comm, routing | |
 | eos_sync_polling (ch18) | 1.26x | serving | |
@@ -452,12 +452,21 @@ sm103 port), llama_3_1_8b 2.54x (compile-mode guard), the decode ladder (decode 
 warp-spec 5.43x), MoE journey torch.compile 43.38x, blackwell_matmul tcgen05 126x vs naive. The
 NVFP4 GEMM (labs/nvfp4_gemm) is the one clean kernel-SoL target and is at its H4/P4 vendor ceiling.
 
-SoL framing (B): the one comm win with a reported bandwidth is nixl at 92.66 GB/s (a tiered C2C/PCIe
-transfer path, 40x over the 2.29 GB/s naive staging). The tcgen05 kernel wins sit below the cuBLAS
-tensor-core SoL, consistent with the established ch10 P2-vs-P4 teaching framing. The other comm wins
-are time-based (no reported bandwidth), so a per-win measured NVLink %SoL needs in-pod dcgmi
-NVLINK-byte correlation over each short torchrun window; that is a heavy follow-up disproportionate
-to teaching labs whose speedup-over-naive is the intended lesson, banked as the next-lever.
+SoL framing (B), measured 2026-06-09:
+- Kernel (B2): matmul_tcgen05_pipelined measured at 1057 TFLOPS = 28.2% of the GB300 FP16
+  tensor-core SoL (3750 TFLOPS), via accurate CUDA-event timing of its size=12288 FP16 GEMM
+  (3.509 ms/iter). So the tcgen05 teaching kernel's 2.32x-over-naive sits at ~28% of the
+  tensor-core ceiling. That is the P2 teaching gap vs the vendor cuBLAS path, now measured rather
+  than asserted; the other tcgen05 teaching kernels fall in the same band. This is a real headroom
+  signal (a tuned kernel reaches 70-90% of SoL), but closing it is a kernel-rewrite of a teaching
+  kernel whose lesson is the technique, not vendor-parity.
+- Comm (B1): NVLink telemetry is live (a controlled P2P copy moved 107 GB at ~85 GB/s single-stream
+  payload, dcgmi is absent so this used nvidia-smi nvlink counters). But the teaching nccl run moved
+  negligible NVLink bytes (peak ~0 across 122 samples spanning the run): the headline comm wins
+  (nccl 20.27x and the like) are small-message LATENCY-bound, not NVLink-BW-bound, so they sit
+  nowhere near the 1.8 TB/s NVLink ceiling. That is expected (the win is algorithmic/latency, not
+  bandwidth saturation), not a BW-headroom lever. nixl 92.66 GB/s is a C2C/tiered path (about 10%
+  of the ~900 GB/s Grace-Blackwell C2C).
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
