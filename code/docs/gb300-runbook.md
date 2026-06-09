@@ -268,6 +268,36 @@ relL2 ~1.4 / "numerically wrong"; that was a wrong-reference test error: the
 kernel computes `A[M,K] @ B[N,K]^T` with shape constraints `m%128==0, n%256==0,
 k%64==0`, so the reference must be `a @ b.T`, not `a @ b`. Superseded.)
 
+## Missing repo deps on the NGC base image (env gap, not a repo bug)
+
+Found 2026-06-09 (ch16 `flashinfer_block_sparse` failed `No module named 'flashinfer'`).
+The pod runs the NGC base image, which is NOT the repo's pinned env: a set of
+`requirements_latest.txt` deps are absent (verified by import, not just name match):
+`flashinfer-python`, `vllm`, `transformers`, `accelerate`, `sentencepiece`,
+`compressed-tensors`, `xgrammar`, `openai`, `anthropic`, `kvikio-cu13`, plus vllm's
+transitive deps and the dev/viz tools (jupyter/ruff/mypy/seaborn/...). The repo is
+correct (requirements lists them); the NGC image just predates a full install.
+
+Impact is small + specific (the CUDA/Triton chapter targets do not need these, which
+is why ch01-17 ran clean):
+- flashinfer (`flashinfer-python==0.6.3`): blocks `ch16:flashinfer_block_sparse`,
+  `labs/flashinfer_attention`, and the flashattention4 best-available paths. FIXED on
+  the pod: `pip install --no-deps flashinfer-python==0.6.3 apache-tvm-ffi` (its
+  `tvm_ffi` backend; torch requirement is unpinned so torch 2.12 is untouched).
+  VALIDATED on GB300: flashinfer_block_sparse compiles + runs (sm_103), no kernel-image
+  or import error.
+- vllm: needed only by `labs/dynamic_router` (4 targets) and `labs/trtllm_phi_3_5_moe`
+  (which also needs external model/engine assets, so it skips regardless). NOT installed
+  on the pod: `vllm==0.16.0` pins torch/triton strictly, so installing it mid-run would
+  downgrade the validated torch 2.12 / triton 3.7 and risk the whole inventory. Run the
+  4 dynamic_router targets on the repo's pinned env (`pip install -r
+  requirements_latest.txt` on torch 2.9.1+cu130 / triton 3.5.0), which also resolves
+  the Triton-3.7 max-autotune quirk. Documented, not worked around mid-loop.
+
+Proper one-shot fix for a from-scratch GB300 run: build the image from
+`requirements_latest.txt` (the pinned toolchain) rather than layering on the NGC base;
+then only the GB300-arch source fixes in this doc are needed.
+
 ## sm_100a hardcode in lab loaders (the Phase-0 fix was incomplete)
 
 Found 2026-06-09 (the loop surfaced `ch10:matmul_tcgen05_pipelined` failing with
