@@ -177,6 +177,19 @@ flagged NVFP4 GEMM as "4.4 s / broken"; the real number is microseconds (above).
   pinned Triton 3.5.0 and on every other arch. Validated on GB300: optimized now
   runs (no abort) at 2.97 ms vs eager baseline 7.54 ms = 2.54x.
 
+  Generalized (2026-06-09): the same guard now lives centrally in
+  `core/utils/compile_utils.get_optimal_compile_mode()` (the documented selector
+  that `compile_model()` routes through), so EVERY `compile_model` caller that asks
+  for max-autotune is auto-downgraded to default on sm_103 + Triton >= 3.6 (warns),
+  not just llama. Validated: `get_optimal_compile_mode("max-autotune")` returns
+  "default" on GB300 + Triton 3.7. CAVEAT: targets that call `torch.compile(...,
+  mode="max-autotune")` DIRECTLY (several MoE-journey levels, blackwell_matmul_pipeline,
+  moe_backend_selection, nanochat, train_distributed, flashattention4/flexattention)
+  bypass the helper and can still hit the abort on Triton 3.7 if they model-compile;
+  they are correct on the pinned Triton 3.5.0. The inventory loop (isolated_runner +
+  watchdog) surfaces any real direct-call crasher cleanly as a failed target; route
+  a crasher through `get_optimal_compile_mode`/`compile_model` to fix it on 3.7.
+
 ## Toolchain-version-skew note (important)
 Both targets below were NGC base-image version skews, NOT fundamental GB300
 problems, and BOTH are now RESOLVED (2026-06-09): block_scaling via the cutlass-dsl
