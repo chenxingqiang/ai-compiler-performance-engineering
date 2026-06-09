@@ -239,3 +239,35 @@ the fix is what unblocks the entire tcgen05/TMEM frontier-kernel family
 relL2 ~1.4 / "numerically wrong"; that was a wrong-reference test error: the
 kernel computes `A[M,K] @ B[N,K]^T` with shape constraints `m%128==0, n%256==0,
 k%64==0`, so the reference must be `a @ b.T`, not `a @ b`. Superseded.)
+
+## GB300 hazard: intermittent tcgen05 cluster-graph hang + slow hang-detection
+
+Found 2026-06-09 during the inventory loop: `ch10:tcgen05_cluster_pipeline`
+(optimized = cluster-launched tcgen05 GEMM replayed from a CUDA graph) HUNG in its
+optimized-timing phase, pinning a GPU at 100% with no progress for ~55 min (the
+benchmark heartbeat froze at the identical snapshot the whole time). It wedged the
+entire inventory until the stuck isolated_runner was killed, after which the loop
+recorded the target failed and advanced normally (ch10 finished, ch11 started).
+
+Two distinct issues:
+
+1. The kernel hang is INTERMITTENT. In isolation on a clean GPU the exact path
+   (direct cluster matmul, CUDA-graph capture, and 50 graph replays) all run clean,
+   so it is not deterministic. Treat the cluster-launch + CUDA-graph-replay
+   combination for tcgen05 as a GB300 (sm_103) reliability hazard, not a guaranteed
+   failure. Root-causing further needs a reliable repro (not yet found).
+
+2. Hang-detection was far too slow. `BenchmarkDefaults.measurement_timeout_seconds`
+   is 1200s, and with the timeout multiplier the effective per-target bound was
+   ~3600s, so a hung sub-second microbench was not reaped for ~60 min. The harness
+   DOES kill on `subprocess.TimeoutExpired` (a parent-side `communicate(timeout=...)`
+   plus a process-group SIGTERM/SIGKILL), so the in-process SIGALRM cannot-interrupt-
+   a-CUDA-kernel problem is handled; the issue is purely that the bound is too
+   generous for catching a hang quickly.
+
+Mitigations applied: `optimized_tcgen05_cluster_pipeline.get_config()` now pins
+`setup_timeout_seconds=180` + `measurement_timeout_seconds=180` (it is a sub-second
+microbench, so 180s covers a cold compile and the fast measurement while failing a
+hang ~10x sooner). For resilient unattended inventory runs on GB300, prefer a tight
+per-target `measurement_timeout` and `timeout_multiplier=1` so any hang fails fast
+instead of eating the per-chapter wall-clock budget.

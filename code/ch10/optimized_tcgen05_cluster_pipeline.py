@@ -67,7 +67,19 @@ class OptimizedTcgen05ClusterPipelineBenchmark(Tcgen05MatmulBenchmarkBase):
                 self.output = self._output_buffer
 
     def get_config(self) -> BenchmarkConfig:
-        return BenchmarkConfig(iterations=10, warmup=5)
+        # This is a sub-second microbench (cluster-launched tcgen05 GEMM replayed
+        # from a CUDA graph). Bound it tightly: the cluster-launch + CUDA-graph
+        # replay can intermittently hang on Blackwell Ultra (sm_103), and the
+        # default 1200s measurement timeout (times the timeout multiplier) lets a
+        # single hung replay wedge a whole inventory run for tens of minutes
+        # before it is reaped. 180s covers a cold module compile and the fast
+        # measurement while failing a hang an order of magnitude sooner.
+        return BenchmarkConfig(
+            iterations=10,
+            warmup=5,
+            setup_timeout_seconds=180,
+            measurement_timeout_seconds=180,
+        )
 
     def teardown(self) -> None:
         self._graph = None
