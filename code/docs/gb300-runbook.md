@@ -393,12 +393,23 @@ exactly like the cuBLASLt FP8 path. The lab uses N/N (a col-major reinterpretati
 path tolerates but NVFP4 does not), which cuBLASLt rejects. This is a fixable wrong-transpose bug,
 not a driver/toolchain gate, and the lab's own skip message is misleading.
 
-Fix recipe (the next-lever, a correctness-sensitive re-layout of the teaching lab): set
-transa=CUBLAS_OP_T, keep transb=CUBLAS_OP_N, store/quantize both operands so the contraction dim K
-is the leading dim (K-major A and B, the standard cuBLASLt low-precision TN layout), FP16/BF16
-output, then verify numerics. GB300's NVFP4 GEMM capability is independently already demonstrated
-and SoL-grounded at ceiling via the CUTLASS labs/nvfp4_gemm path, so this cuBLASLt teaching variant
-is banked with the proven fix recipe rather than rewritten blind.
+Fix recipe (implemented + verified in a standalone reproducer): set transa=CUBLAS_OP_T, keep
+transb=CUBLAS_OP_N, store/quantize both operands K-major (contraction dim K is the leading dim, the
+standard cuBLASLt low-precision TN layout), FP16/BF16 output. Two reproducers confirm it:
+1. All-ones TN FP4 GEMM (A=B=FP4 1.0, unit UE4M3 scales): heuristic results=1 and the running GEMM
+   gives C == K (256), VERIFY PASS (`/tmp/fp4gemm.cu`). So the TN layout/transpose/dtype recipe
+   COMPUTES correctly end-to-end on GB300, not merely heuristic-accepts.
+2. Real (non-uniform) inputs with a PLAIN row-major scale layout: maxrel 5.9, 33/64 elements wrong,
+   VERIFY FAIL (`/tmp/fp4real.cu`). So cuBLASLt VEC16_UE4M3 requires a SWIZZLED scale-factor layout
+   (the all-ones case passed only because every scale is 1, swizzle-independent).
+
+So the FP4 cuBLASLt unblock is fully characterized: the TN recipe is proven to compute, and the one
+remaining piece is the VEC16_UE4M3 scale-factor swizzle (the cuBLASLt block-scaling interleave) for
+real inputs. That swizzle is a cuBLASLt-spec-dependent layout; the full lab fix is TN layout (A is
+naturally K-major, B re-packed K-major) plus the scale swizzle plus the lab's verification. GB300's
+NVFP4 GEMM capability is independently already at the H4/P4 vendor ceiling via the CUTLASS
+labs/nvfp4_gemm path, so the scale-swizzle implementation of this cuBLASLt teaching variant is
+banked as the precise next-lever with the two reproducers as evidence.
 
 Separately, baseline_cublaslt_gemm_fp4_sm103 segfaults (exit -11) on GB300, a naive-FP4-baseline
 memory bug to fix before the pair yields a clean A/B.
