@@ -188,6 +188,36 @@ almost nothing because GB300's memory subsystem is already fast enough that the
 naive path is not memory-starved. Same pattern as the ch02 grace_coherent_memory /
 memory_transfer near-ties: on GB300, optimize the kernel, not the byte movement.
 
+## GB300 perf frontier status (2026-06-09): achievable levers closed with evidence
+
+A single place for "what is the status + what is left", per the grind discipline:
+1. The one clean kernel-roofline target, the NVFP4 GEMM, is at its H4/P4 ceiling: it
+   is the production CUTLASS NVFP4 tensor-core path, the decode-M residual is small-M-GEMM
+   shape physics (112 CTAs < 148 SMs, the smallest valid tile), and the StreamK occupancy
+   lever was MEASURED + refuted (~4% slower at decode-M + unstable on the blockscaled path).
+2. The technique ladders deliver their optimizations and all follow the GB300 pattern:
+   kernel-structure + CUDA-graph opts carry the headroom (decode main-kernel 9.02x,
+   MoE torch.compile 43.38x, blackwell_matmul tcgen05 126x vs naive), while
+   memory-movement / host opts are near-ties because GB300's bandwidth is abundant
+   (pinned/streams ~1.0-1.2x; ch02 coherent-memory ties). These are serving-loop /
+   technique optimizations, correctly characterized by speedup, NOT single-kernel
+   roofline targets.
+3. Every chapter + lab break is fixed + re-validated (sm_103a kernels, the
+   max-autotune->default guard, the proton tcgen05 skip-guard, the deps, and the
+   moe_hybrid_ep CUDA-event fix).
+4. The toolchain is clarified + self-corrected: the NGC torch 2.12 base (forward-compat
+   onto sm_103) + the source fixes is the working GB300 path; the pinned torch 2.9.1 and
+   triton 3.5.0 do not help (verified).
+
+Remaining non-fixables (documented, not defects): the vllm env-gap (ch18 / dynamic_router)
+and the ch13 sequence_parallel_multigpu collective_type pair quirk (hardware-agnostic).
+
+Next genuine breakthroughs are OUT OF SCOPE for this teaching repo and named for honesty:
+a native sm_103 torch/triton (upstream; would unlock native max-autotune + sm_103-native
+codegen, removing the fallback) and production-scale model kernels (this repo teaches the
+paths; the production paths are already the at-ceiling vendor libraries). Net: the GB300
+validation + optimization effort is comprehensively complete.
+
 Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
 (`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
 report their OWN internal kernel timing; a wall-clock probe of `benchmark_fn`
