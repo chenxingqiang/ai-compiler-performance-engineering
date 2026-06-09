@@ -96,3 +96,17 @@ The CUDA-binary build path (`detect_sm.py`, `cuda_binary_benchmark.py`,
 
 Passing tier1 targets (with my fixes, strict validity): `persistent_decode`
 (20.2x), `ch04:gradient_fusion` (150.8x), `kv_optimization:kv_standard` (2.4x).
+
+### tcgen05 hand-written kernels: compile/load on sm_103a but numerically wrong
+Direct validation on GB300: the hand-written tcgen05 matmul
+(`ch10/matmul_tcgen05.cu` via `core/common/tcgen05`) now compiles and loads with
+the `sm_103a` fix (the prior `sm_100a` cubin is architecture-locked and will not
+load on an `sm_103` device, so the fix is required), but the kernel produces
+incorrect output on sm_103 (relL2 ~1.4 vs a reference fp16 matmul). The
+hand-written tcgen05/TMEM kernels are sm_100-specific and need sm_103-aware
+updates (TMEM layout / MMA atom). The harness verification flags these as
+failed_verification rather than reporting fake speedups, so this is caught, not
+silent. This is Phase-5 white-box kernel work, not a recompile. Affected:
+ch08/ch10 tcgen05 labs and `custom_vs_cublas`. The CUTLASS-template tcgen05 paths
+(which carry their own arch handling) should be checked separately from the
+hand-written `.cu` kernels.
