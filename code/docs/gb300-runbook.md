@@ -349,6 +349,32 @@ fabric this single node lacks). So the nvshmem half contributes no wins: it is a
 infra-wall, not a missing-dependency gap. The `_multigpu` suffixed duplicates are not separately
 run (the base names already torchrun-dispatch to 4 GPUs).
 
+## Untested non-ch04 closure (2026-06-09): 4 more wins, premature "complete" corrected
+
+The earlier "coverage audit complete" line was premature: it checked only a sliver, not every
+chapter. A naming-aware audit (resolving `_cuda` / `_multigpu` / `_enhanced` variants) found
+genuinely-untested non-ch04 targets, and running the 13 runnable non-vllm ones added 4 validated
+wins:
+1. ch11:warp_specialized_two_pipelines_multistream 2.36x (the earlier 300s-timeout fix, now validated).
+2. ch10:matmul_tcgen05_pipelined 2.32x (the earlier sm_103a gencode fix, now validated).
+3. ch10:tcgen05_cluster_pipeline 1.58x (the earlier tighter-timeout fix, now validated).
+4. ch18:eos_sync_polling 1.26x.
+
+The first three confirm that earlier source fixes (sm_103a kernels, timeouts) produce real wins once
+their results are actually captured. Gated skips (graceful, not fixable in this image):
+ch09:cublaslt_gemm_fp4 ("SKIPPED: cuBLASLt NVFP4 ...", the image's cuBLASLt lacks the NVFP4 GEMM
+path) and ch10:tcgen05_warpgroup_specialization (kernel skip gate). Informational examples (run and
+demonstrate a concept, not perf pairs): ch19:nvfp4_training, ch14:cublas_vs_cutlass,
+ch15:inference_placement, ch17:inference_full, ch17:pipeline_parallelism, ch20:pipeline_sequential,
+ch05:ai.
+
+With these run, the coverage is now evidence-complete (not asserted-complete): every runnable,
+non-env-gapped target has a GB300 result. The only untested remainder is the vllm env-gap (ch18
+vllm_*, labs/dynamic_router; vllm breaks the NGC toolchain), the ch04 nvshmem runtime/fabric
+infra-wall, the 2 gated skips above, and the 7 informational examples. Honest note: this is the
+second corrected over-claim of the session (the first was the nvshmem "not installed" note);
+re-examining on "proceed" surfaced 4 wins the premature close would have buried.
+
 Net: ch04 is no longer a coverage blind spot. It contributed 12 validated GB300 wins (up to
 40.44x), 5 ties, 3 banked torchrun edge cases, 1 clean skip, and the nvshmem env-gap, plus the
 refined comm pattern.
