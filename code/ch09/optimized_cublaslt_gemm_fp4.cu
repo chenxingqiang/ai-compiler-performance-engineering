@@ -208,18 +208,33 @@ int main() {
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaleMode, sizeof(scaleMode)));
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaleMode, sizeof(scaleMode)));
 
-    // Scale pointers must be non-null at heuristic time for the block-scaled path
-    // (set to batch 0 here; updated per batch in run_batch below).
+    // Scale pointers (batch 0 start). cuBLASLt advances the VEC16 block scale per batch for the
+    // batched matmul below, because the SF buffers are laid out per-batch contiguous and the
+    // operand layouts declare the batch (confirmed by a standalone 2-batch probe). Must be
+    // non-null at heuristic time for the block-scaled path.
     void* as0 = d_A_scales;
     void* bs0 = d_B_scales;
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &as0, sizeof(as0)));
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &bs0, sizeof(bs0)));
 
-    // Layouts (col-major): A = K x M (lda=K), B = K x N (ldb=K), C = M x N (ldc=M).
+    // Layouts (col-major): A = K x M (lda=K), B = K x N (ldb=K), C = M x N (ldc=M), batched over
+    // kBatchCount matrices in ONE matmul. A single 4096^3 GEMM (256x256 tile -> 256 output tiles)
+    // underfills the 152-SM GPU (ncu: 10% occupancy, 53% SM); batching all kBatchCount matrices
+    // (~2048 tiles) fills it and lifts tensor-core throughput.
     cublasLtMatrixLayout_t layoutA, layoutB, layoutC;
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutA, CUDA_R_4F_E2M1, K, M, K));
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutB, CUDA_R_4F_E2M1, K, N, K));
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutC, CUDA_R_16F, M, N, M));
+    const int batchCount = kBatchCount;
+    const long long strideA = (long long)K * M;   // elements per A matrix (FP4)
+    const long long strideB = (long long)K * N;   // elements per B matrix (FP4)
+    const long long strideC = (long long)M * N;   // elements per C matrix (FP16)
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutA, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutB, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutC, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutA, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideA, sizeof(strideA)));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutB, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideB, sizeof(strideB)));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutC, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideC, sizeof(strideC)));
 
     float alpha = 1.0f, beta = 0.0f;
     size_t workspaceSize = 64ull << 20;
@@ -247,28 +262,26 @@ int main() {
 
     std::cout << "NVFP4 GEMM algorithm found, running benchmark..." << std::endl;
 
-    // Per-batch single-matrix matmul (mirrors the baseline's per-batch kernel loop).
-    auto run_batch = [&](int batch) {
-        void* as = d_A_scales + (size_t)batch * scaleA;
-        void* bs = d_B_scales + (size_t)batch * scaleB;
-        CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &as, sizeof(as)));
-        CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &bs, sizeof(bs)));
+    // One batched matmul over all kBatchCount matrices. cuBLASLt strides the operands, C, AND the
+    // per-batch block-scale pointers (set once above); d_A/d_B/d_C/d_A_scales/d_B_scales are each
+    // laid out per-batch contiguous to match the strides.
+    auto run_batched = [&]() {
         CUBLASLT_CHECK(cublasLtMatmul(ltHandle, matmulDesc,
                                       &alpha,
-                                      d_A + (size_t)batch * packedA, layoutA,
-                                      d_B + (size_t)batch * packedB, layoutB,
+                                      d_A, layoutA,
+                                      d_B, layoutB,
                                       &beta,
-                                      d_C + (size_t)batch * elements_C, layoutC,
-                                      d_C + (size_t)batch * elements_C, layoutC,
+                                      d_C, layoutC,
+                                      d_C, layoutC,
                                       &heuristicResult.algo,
                                       d_workspace, workspaceSize,
                                       stream));
     };
 
     // Warmup
-    for (int batch = 0; batch < kBatchCount; ++batch) {
+    {
         NVTX_RANGE("compute_math:ltmatmul");
-        run_batch(batch);
+        run_batched();
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -278,11 +291,8 @@ int main() {
 
     CUDA_CHECK(cudaEventRecord(start, stream));
     for (int iter = 0; iter < kIterations; ++iter) {
-        NVTX_RANGE("batch");
-        for (int batch = 0; batch < kBatchCount; ++batch) {
-            NVTX_RANGE("compute_math:ltmatmul");
-            run_batch(batch);
-        }
+        NVTX_RANGE("compute_math:ltmatmul");
+        run_batched();
     }
     CUDA_CHECK(cudaEventRecord(stop, stream));
     CUDA_CHECK(cudaEventSynchronize(stop));

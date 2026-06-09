@@ -471,14 +471,19 @@ fix): the optimized path resolves to the CUTLASS sm100 block-scaled NVFP4 tensor
 i.e. the real H4 ue4m3xf4 tensor-core path, not a fallback. At 4096^3 the kernel runs Compute(SM)
 52.7%, DRAM 8.3%, achieved occupancy 10.1%, 29.3 us/GEMM: tensor-compute-bound, but only ~53% SM
 because a single 4096^3 GEMM with the 256x256 tile makes just 256 output tiles on 152 SMs (~1.7
-waves), so the GPU is UNDERFILLED at this shape. So the 4709 TFLOPS headline is a genuine NVFP4
-tensor-core number at ~53% SM, underfill-limited, NOT at the vendor ceiling. Lever (banked, the
-plan-B headroom find): cuBLASLt BATCHED matmul (the 8 matrices in one call -> ~2048 output tiles ->
-fills the 152-SM GPU) or a larger single problem would lift SM throughput toward the tensor-core
-ceiling. The current single-matrix-looped recipe trades GPU fill for sidestepping the
-batched-block-scale (per-batch SF) question; pursuing batched is the FP4 throughput next lever, gated
-on confirming cuBLASLt advances the block-scale pointer per batch (unprobed) and on not regressing the
-now-green single-matrix lab.
+waves), so the GPU is UNDERFILLED at this shape. So the single-matrix 4709 TFLOPS was a genuine NVFP4
+tensor-core number at ~53% SM, underfill-limited, NOT at the vendor ceiling.
+
+BATCHED LEVER REALIZED (2026-06-09, the plan-B headroom find turned into a win): a standalone 2-batch
+probe confirmed cuBLASLt advances the VEC16 block-scale pointer per batch (both batches verify, maxrel
+~0.0005), so the lab was reworked to ONE batched cublasLtMatmul over all kBatchCount matrices
+(BATCH_COUNT + STRIDED_BATCH_OFFSET on the A/B/C layouts; scale pointers set once, cuBLASLt strides
+them). Filling the GPU (256 -> ~2048 output tiles): measured 4709 -> 6634.69 TFLOPS (1.41x), harness
+speedup 467.54x -> 655.40x vs naive, ncu Compute(SM) 52.7% -> 78.68% (DRAM 8.3% -> 28.4%; achieved
+occupancy stays ~10%, inherent to the 256x256 tile, so the gain is wave-quantization/fill, not
+occupancy). Verification preserved (checksum 2.33195e9, identical to the single-matrix path;
+ch09:cublaslt_gemm_fp4 --profile none green). 78.68% SM is near the well-fed tensor-core ceiling for
+this shape, so the FP4 signature path is now SoL-grounded AND filled.
 
 ## GB300 validated wins summary (consolidated, 2026-06-09)
 
@@ -487,7 +492,7 @@ verification-passed. Speedups are vs the lab's own naive/baseline arm (the book'
 
 | Win (chapter) | Speedup | Category | SoL note |
 | --- | --- | --- | --- |
-| cublaslt_gemm_fp4 (ch09) | 467.54x | kernel, FP4 tensor cores | ~4709 TFLOPS cuBLASLt NVFP4 vs 10.09 naive (no TC); skip->pass via TN+scale-swizzle. Naive-vs-TC, not tuned-vs-tuned |
+| cublaslt_gemm_fp4 (ch09) | 655.40x | kernel, FP4 tensor cores, batched | 6635 TFLOPS @ 78.68% SM (ncu L4) cuBLASLt NVFP4 batched vs 10.09 naive (no TC); skip->pass via TN+swizzle, then batched fills the GPU 256->2048 tiles (+1.41x over single-matrix). Naive-vs-TC headline |
 | nixl_tier_handoff (ch04) | 40.44x | comm, tiered transfer | 92.66 GB/s achieved vs 2.29 naive (measured) |
 | nccl (ch04) | 20.27x | comm, right-engine | NCCL vs naive; small-message latency-bound (~0 NVLink BW measured) |
 | cpu_reduction (ch04) | 18.20x | comm, right-engine | GPU vs CPU reduction |
