@@ -91,6 +91,15 @@ Confirmed working on GB300 (Blackwell Ultra) during breakthrough validation:
 - NVFP4 GEMM (CUTLASS NVFP4 tensor cores), real binary timing (decode shapes
   M=128, leaderboard N/K): `optimized_nvfp4_gemm_sm103` geomean 7.39 us vs
   baseline 9.78 us (1.32x); largest shape ~3.1 PFLOPS / ~60% HBM-bound SoL.
+- ch09 CuTe-DSL NVFP4 GEMM (`optimized_cute_dsl_nvfp4_gemm_sm103`): 7.55 us vs
+  17.9 us baseline (2.37x).
+- MoE optimization ladder (`moe_optimization_journey`, Python kernels):
+  `optimized_moe_cuda_graphs` 0.935 ms vs 38.9 ms naive baseline (41.6x);
+  `optimized_moe_triton` 17x.
+
+Net: the repo's frontier optimizations (tcgen05/TMA GEMM, NVFP4 GEMM, MoE ladder)
+deliver real speedups on GB300. The headline GB300 fix is the `sm_103a` unblock of
+the tcgen05/TMEM family (previously unloadable on Blackwell Ultra).
 
 Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
 (`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
