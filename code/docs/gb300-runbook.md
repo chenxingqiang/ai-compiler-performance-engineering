@@ -319,25 +319,58 @@ pattern but is inert on a single node; it is the multi-node analog.) This is a
 general EP-correctness bug, not GB300-specific, but the single-node 4-GPU topology
 makes it fire every run.
 
-FIX (designed, validation pending): make the same-node dispatch collective-symmetric.
-(a) Caller: call `_roundtrip_routes` for ALL local_group ranks when
-`local_world_size > 1` (drop the per-rank `same_node_mask.any()` gate); the empty
-ranks pass empty token tensors. (b) `_roundtrip_routes`: early-return only when
-`group_size <= 1`; for `group_size > 1` proceed even with empty `tokens` so the rank
-still does the symmetric `_exchange_counts` (all_gather of counts) + the dispatch and
-return `_all_to_all_single` (send 0, receive peers' tokens, compute, return them).
-`bincount(empty, minlength=group_size)` -> all-zero send_counts and the all-to-all
-handles 0 input splits with non-zero output splits, so the empty rank participates
-correctly. Apply the analogous symmetric change to the remote path for multi-node.
+UPDATE (2026-06-09, trace-grounded): the prior same_node-gate root cause is
+INSUFFICIENT (superseded). A 4-rank repro on the now-free GB300 node, instrumented
+with py-spy (per-rank Python stack) AND a per-rank collective tracer (monkeypatch
+`dist.{all_reduce,all_gather,all_to_all,all_to_all_single,barrier}` to log seq+op+shape),
+shows the hang on the BASELINE arm too -- and the baseline does NOT use the same_node
+optimized path. So the same_node empty-token gate is a real latent bug but NOT the
+(sole) cause.
 
-VALIDATION PLAN (deferred; high-cost + the loop holds GPUs intermittently): on the
-GB300 node, a 3-4 rank `torchrun` of the entrypoint with a lowered NCCL timeout
-(e.g. `init_process_group(timeout=30s)`) for fast repro: confirm the hang on current
-code, then confirm pass + correct numerics on the fix, then a strict harness re-run
-of both `moe_hybrid_ep` targets. Not committed as code until validated (no unvalidated
-distributed fix per the rigor discipline). The loop records both targets failed and
-continues (the hang did not wedge the inventory: the 600s NCCL timeout + harness
-contained it).
+DEFINITIVE TRACE: all 4 ranks issue 59 collectives; the streams are byte-identical
+through #58 (the dispatch: 1 all_gather + 4 all_to_all), then at #59 rank1 issues
+`all_reduce shape=[16]` (forward_loss metrics `route_counts_global`, line ~683,
+shape=num_experts) while ranks 0/2/3 issue the shutdown `barrier` (line 139). py-spy
+confirms: 3 ranks at `shutdown_topology` barrier, 1 stuck in `forward_loss`. So one
+rank issues exactly ONE extra `route_counts`-shaped all_reduce -> NCCL order-desync
+-> deadlock (barrier needs all 4).
+
+NCCL WATCHDOG (the definitive size-mismatch): at NCCL `SeqNum=59` (last completed 58
+on every rank), rank1 issues `ALLREDUCE NumelIn=16` (route_counts_global, line ~683)
+while ranks 0/2/3 issue `ALLREDUCE NumelIn=1` (a scalar). So rank1 is the lone
+straggler -- it SKIPPED one scalar all_reduce the others did, leaving it one collective
+behind, and the size mismatch (16 vs 1) deadlocks. This is a missing-collective on
+exactly ONE rank, data-dependent (each rank's `data_seed=4242+rank` gives different
+routing).
+
+RULED OUT (5 hypotheses tested + refuted with the trace/NCCL/py-spy evidence):
+(1) same_node empty-token gate -- the BASELINE arm hangs and does not use that path;
+(2) per-rank step count -- `_steady_state_warmup_steps` returns a uniform 2;
+(3) `_sync_replicated_grads` `if param.grad is None: continue` -- a genuine latent
+asymmetric-collective bug (fixed to all_reduce all replicated params, None->zeros, the
+correct DDP average), but the hang PERSISTED;
+(4) stale `.pyc` masking the fix -- re-ran with `__pycache__` force-cleared + source
+re-touched, hang PERSISTED;
+(5) variable metric key-set -- `compute_moe_metrics` + the `forward_loss`/`run_step`
+metric `.update()`s + `_reduce_metrics` (827) all iterate a FIXED, uniform key set, so
+the scalar all_reduce count is uniform there.
+
+So every collective source read so far (dispatch 5, metrics block route_counts+3 scalars,
+_reduce_metrics over a fixed key set, grad-sync over all replicated params) is uniform,
+yet one rank still skips exactly one scalar all_reduce. NEXT LEVER (precise): per-LINE
+collective instrumentation (tag each `dist.all_reduce` call site, not just seq+shape)
+on a 4-rank repro to identify the exact skipped call site on the straggler rank -- the
+asymmetry is a non-obvious / data-dependent collective NOT in any of the five uniform
+sources above (candidate: a torch/NCCL interaction, or a collective hidden in a
+helper). The two latent asymmetric-collective bugs already positively identified (the
+same_node empty-token gate + the grad-sync None-skip) belong in the eventual full fix.
+Tooling for the next session: per-rank monkeypatch tracer with `traceback.extract_stack()`
+on each collective (to get the call site) + `py-spy dump` (`pip install py-spy`) + an
+env-driven `init_process_group` timeout for fast repro (the torch 2.12
+`TORCH_NCCL_DESYNC_DEBUG` dump did NOT fire). Per the rigor discipline (no unvalidated
+distributed fix committed), all attempted fixes were REVERTED; this analysis is the
+deliverable. The harness records both targets failed and continues (the NCCL timeout
+contains the hang; it never wedged the inventory).
 
 ## Missing repo deps on the NGC base image (env gap, not a repo bug)
 
