@@ -81,6 +81,25 @@ The harness was calibrated for B200/GB200 (`sm_100`); these make it GB300-correc
 The CUDA-binary build path (`detect_sm.py`, `cuda_binary_benchmark.py`,
 `cuda_arch.mk`) was already GB300-aware (CC 10.3 -> `sm_103`).
 
+## Validated frontier-kernel results on GB300
+Confirmed working on GB300 (Blackwell Ultra) during breakthrough validation:
+- tcgen05/TMEM family: `ch10/matmul_tcgen05.cu` relL2 0.00021 (raw, `A @ B^T`
+  reference); `ch08:tcgen05_custom_vs_cublas` SUCCEEDED in the harness. The
+  `sm_103a` fix is what unblocks this whole family (it could not load before).
+- `blackwell_matmul` (2048^3, Python-kernel): tcgen05 variant 0.123 ms vs naive
+  baseline 15.5 ms (126x); TMA variant 2.39 ms (6.5x).
+- NVFP4 GEMM (CUTLASS NVFP4 tensor cores), real binary timing (decode shapes
+  M=128, leaderboard N/K): `optimized_nvfp4_gemm_sm103` geomean 7.39 us vs
+  baseline 9.78 us (1.32x); largest shape ~3.1 PFLOPS / ~60% HBM-bound SoL.
+
+Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
+(`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
+report their OWN internal kernel timing; a wall-clock probe of `benchmark_fn`
+measures binary launch + CUDA init + the full internal iteration loop, NOT the
+kernel, and overstates time by ~1000x. Use the harness (which parses the binary
+stdout) or run the `*_sm103` binary directly. An early ad-hoc probe wrongly
+flagged NVFP4 GEMM as "4.4 s / broken"; the real number is microseconds (above).
+
 ## Open issues found on GB300 (tier1)
 - `labs/block_scaling:block_scaling`: CUTLASS DSL leading-dim stride assertion
   (`Expected strides[leading_dim] == 1, but got 8388608`). The lab loads the
