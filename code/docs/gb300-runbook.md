@@ -291,6 +291,41 @@ Coverage closures found by the hunt (targets untested in the original sweep):
 Net: no latent max-autotune crash exists on GB300, and the coverage gaps are closed
 (flashattention4 and flashinfer_block_sparse now validated).
 
+## ch04 distributed/comm coverage closure (2026-06-09): hidden win cluster found
+
+ch04 (distributed/comm) was the largest untested chapter on GB300: only 1 of ~48 targets had
+a result (gradient_fusion). The harness auto-dispatches torchrun (nproc_per_node 4) for these,
+so the single-node comm suite runs on the 4-GPU NVLink node. Hunting it surfaced real validated
+wins the original sweep missed, and a sharper GB300 comm pattern.
+
+Wins (validated this session, previously untested):
+1. gradient_compression_int8: 2.16x full-step, 5.75x comm-only (the all-reduce in isolation).
+2. gradient_compression_fp16: 1.25x full-step, 3.38x comm-only.
+3. nvlink_topology_aware: 1.48x (topology-aware all-reduce routing).
+
+Ties (overlap or backend-swap opts, correctly classified no_speedup): tensor_parallel async
+overlap 1.01x, symmetric_memory_perf 1.02x, torchcomms 1.01x.
+
+The refined GB300 comm pattern, sharper than the SoL-section "memory-movement opts tie": on the
+fast NVLink fabric, comm-OVERLAP and backend-swap opts tie (the fabric is not the bottleneck,
+so overlapping it or swapping the backend buys almost nothing), but comm-VOLUME-reduction
+(int8/fp16 gradient compression, 4x/2x fewer all-reduce bytes, 5.75x/3.38x on the comm itself)
+and comm-ROUTING (NVLink-topology-aware) opts WIN. Less data, and smarter routing, beat fast
+bandwidth; merely overlapping it does not. This is the distributed-training corollary of the
+decode-ladder lesson (optimize the kernel, not the byte movement): here, reduce or reroute the
+comm bytes, do not just overlap them.
+
+Env-gaps (documented, not failures): the nvshmem half of ch04 (nvshmem_ibgda,
+nvshmem_pipeline_parallel, nvshmem_vs_nccl, nvshmem_training, roughly half the chapter) is
+dep-gated (nvshmem is not installed in this image), and the IBGDA and multi-node variants
+additionally need the absent multi-node fabric. The remaining overlap/orchestration targets
+(pipeline_parallel, dataparallel, reinit_comm) are predicted ties by the pattern above and are
+banked unrun.
+
+Net: ch04 is no longer a coverage blind spot. It contributed three real GB300 wins
+(gradient_compression int8 2.16x and fp16 1.25x, nvlink_topology_aware 1.48x); the
+overlap/backend ties and nvshmem env-gaps are characterized.
+
 Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
 (`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
 report their OWN internal kernel timing; a wall-clock probe of `benchmark_fn`
