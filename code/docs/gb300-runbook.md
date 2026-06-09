@@ -465,6 +465,21 @@ Baseline note (corrected 2026-06-09): baseline_cublaslt_gemm_fp4_sm103 runs FINE
 Tiled FP4 GEMM 13.63 ms, 10.09 TFLOPS, exit 0). The earlier "-11" was an ncu-profiling/harness
 artifact, not a baseline bug.
 
+FP4 GEMM SoL grounding (ncu --set full, sol_rigor L4, 2026-06-09; enabled by the harness profiler-mode
+fix): the optimized path resolves to the CUTLASS sm100 block-scaled NVFP4 tensor-op kernel
+`cutlass3x_sm100_bstensorop_s256x256x64gemm_block_scaled_ue4m3xf4_ue4m3xf4_f32_f16_f16_256x256x256_..._tnn_align32_o_vs16_2sm_...`
+i.e. the real H4 ue4m3xf4 tensor-core path, not a fallback. At 4096^3 the kernel runs Compute(SM)
+52.7%, DRAM 8.3%, achieved occupancy 10.1%, 29.3 us/GEMM: tensor-compute-bound, but only ~53% SM
+because a single 4096^3 GEMM with the 256x256 tile makes just 256 output tiles on 152 SMs (~1.7
+waves), so the GPU is UNDERFILLED at this shape. So the 4709 TFLOPS headline is a genuine NVFP4
+tensor-core number at ~53% SM, underfill-limited, NOT at the vendor ceiling. Lever (banked, the
+plan-B headroom find): cuBLASLt BATCHED matmul (the 8 matrices in one call -> ~2048 output tiles ->
+fills the 152-SM GPU) or a larger single problem would lift SM throughput toward the tensor-core
+ceiling. The current single-matrix-looped recipe trades GPU fill for sidestepping the
+batched-block-scale (per-batch SF) question; pursuing batched is the FP4 throughput next lever, gated
+on confirming cuBLASLt advances the block-scale pointer per batch (unprobed) and on not regressing the
+now-green single-matrix lab.
+
 ## GB300 validated wins summary (consolidated, 2026-06-09)
 
 The wins surfaced from previously-untested coverage on the 4-GPU GB300 node, all
