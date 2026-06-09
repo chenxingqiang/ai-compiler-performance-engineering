@@ -148,6 +148,18 @@ is 1.27x over its own naive baseline). The two frontier GEMM SoL reads together:
 the vendor NVFP4 path is occupancy-bound at decode-M (right kernel, shape-limited),
 and the educational tcgen05 path is P2-vs-P4 off cuBLAS by design.
 
+Decode ladder technique headroom (from the live loop's `labs/decode_optimization`
+strict run, best_speedup vs the lab's naive baseline): decode (main kernel opt)
+9.02x, decode_warp_specialized 5.43x, decode_fp4 1.73x, decode_fp8 1.29x,
+decode_pinned 1.19x, decode_streams 1.05x (below the 1.05x gate), decode_hf_cache /
+decode_double_buffer_tma skipped. The shape of this ladder IS the GB300 decode SoL
+story: the kernel-structure optimizations (the persistent/fused decode kernel and
+warp specialization) carry essentially all the headroom, the quant paths add a
+moderate 1.3-1.7x, and the host/memory-movement optimizations (pinned, streams) add
+almost nothing because GB300's memory subsystem is already fast enough that the
+naive path is not memory-starved. Same pattern as the ch02 grace_coherent_memory /
+memory_transfer near-ties: on GB300, optimize the kernel, not the byte movement.
+
 Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
 (`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
 report their OWN internal kernel timing; a wall-clock probe of `benchmark_fn`
@@ -289,10 +301,14 @@ is why ch01-17 ran clean):
 - vllm: needed only by `labs/dynamic_router` (4 targets) and `labs/trtllm_phi_3_5_moe`
   (which also needs external model/engine assets, so it skips regardless). NOT installed
   on the pod: `vllm==0.16.0` pins torch/triton strictly, so installing it mid-run would
-  downgrade the validated torch 2.12 / triton 3.7 and risk the whole inventory. Run the
+  downgrade   the validated torch 2.12 / triton 3.7 and risk the whole inventory. Run the
   4 dynamic_router targets on the repo's pinned env (`pip install -r
   requirements_latest.txt` on torch 2.9.1+cu130 / triton 3.5.0), which also resolves
   the Triton-3.7 max-autotune quirk. Documented, not worked around mid-loop.
+  CONFIRMED in the live loop: both dynamic_router vllm targets report `status=skipped`
+  (graceful), NOT failed_error, so the missing-vllm gap does not dirty the results.
+  (flashinfer_block_sparse erroring rather than skipping was the inconsistent case;
+  fixed by installing flashinfer.)
 
 Proper one-shot fix for a from-scratch GB300 run: build the image from
 `requirements_latest.txt` (the pinned toolchain) rather than layering on the NGC base;
