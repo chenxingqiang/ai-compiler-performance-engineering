@@ -2814,6 +2814,42 @@ def _harden_profile_env(
     return env
 
 
+def _is_cuda_binary_benchmark(benchmark) -> bool:
+    """True if benchmark is a CudaBinaryBenchmark (compiled-binary subprocess) subclass."""
+    try:
+        return any(c.__name__ == "CudaBinaryBenchmark" for c in type(benchmark).__mro__)
+    except Exception:
+        return False
+
+
+def _cuda_binary_direct_command(benchmark, repo_root, chapter_dir, bench_config):
+    """Return ([binary, *run_args], env) to nsys-profile a CudaBinaryBenchmark's compiled
+    binary directly, or None to fall back to the python-wrapper path.
+
+    Profiling the shared python wrapper for a CudaBinaryBenchmark re-spawns the binary as a
+    child subprocess; under nsys --wait primary nsys follows the python parent and captures
+    the child only partially, then _run_once raises (failed_profiler). Profiling the binary
+    directly captures it fully (validated on GB300: exit 0, all kernels, valid report).
+    """
+    if not _is_cuda_binary_benchmark(benchmark):
+        return None
+    try:
+        if getattr(benchmark, "exec_path", None) is None:
+            benchmark.setup()  # build the perf binary (make no-ops if up to date)
+        exec_path = getattr(benchmark, "exec_path", None)
+        if exec_path is None:
+            return None
+        run_args = [str(a) for a in (getattr(benchmark, "run_args", None) or [])]
+        env = _apply_profile_env_overrides(
+            _harden_profile_env(None, repo_root=repo_root, chapter_dir=chapter_dir),
+            config=bench_config,
+            benchmark=benchmark,
+        )
+        return [str(exec_path), *run_args], env
+    except Exception:
+        return None
+
+
 @contextmanager
 def _temporary_python_profile_launch(
     wrapper_source: str,
@@ -2955,6 +2991,10 @@ def profile_python_benchmark(
                     profiler="nsys",
                     config=bench_config,
                 )
+            cuda_binary_direct = (
+                None if use_torchrun
+                else _cuda_binary_direct_command(benchmark, repo_root, chapter_dir, bench_config)
+            )
             if torchrun_profile_spec is not None and bench_config is not None:
                 target_command, base_env = _build_torchrun_profile_command(
                     bench_config,
@@ -2965,6 +3005,14 @@ def profile_python_benchmark(
                     config=bench_config,
                     benchmark=benchmark,
                 )
+            elif cuda_binary_direct is not None:
+                # nsys-profile the compiled CUDA binary DIRECTLY. The python-wrapper path
+                # re-spawns the binary as a child subprocess; under nsys --wait primary nsys
+                # follows the python parent and captures the child only partially, then
+                # _run_once raises (failed_profiler). Direct nsys captures it fully
+                # (validated on GB300: exit 0, all kernels, valid report).
+                target_command, env = cuda_binary_direct
+                use_torchrun = False
             else:
                 wrapper_source = render_nsys_python_profile_wrapper(
                     benchmark_path=benchmark_path,

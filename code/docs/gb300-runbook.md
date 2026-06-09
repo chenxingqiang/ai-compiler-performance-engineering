@@ -446,11 +446,20 @@ binary, even with the harness's exact flag set (`--trace cuda,nvtx,osrt --sample
 --cuda-memory-usage true --cuda-um-gpu-page-faults true --cuda-um-cpu-page-faults true --wait
 primary`), exits 0 and captures all 88 kernels into a valid report. So `--profile none` is the clean
 correctness+perf verdict, and a DIRECT `nsys profile -t cuda,nvtx,osrt -o out ./<binary>_sm103` is
-the working deep-dive path for any CUDA-binary lab on GB300. Banked next lever: teach the harness to
-nsys-profile a CudaBinaryBenchmark's binary directly (skip the python wrapper for the binary class),
-which would unblock harness profiler-mode for the whole CUDA-binary suite; it is a shared-infra change
-(the wrapper also carries clock-lock/NVTX/validity/env-hardening) so it is deferred, not attempted
-here, since direct nsys already provides the capability.
+the working deep-dive path for any CUDA-binary lab on GB300.
+
+HARNESS FIXED (2026-06-09): the harness now nsys-profiles a CudaBinaryBenchmark's compiled binary
+DIRECTLY instead of via the python wrapper. `core/harness/run_benchmarks.py` adds
+`_cuda_binary_direct_command` (build the binary, return `[binary, *run_args]` + a hardened env) and an
+`elif cuda_binary_direct is not None` branch in the nsys path; any non-binary benchmark falls through
+to the unchanged python-wrapper path. This unblocks harness profiler-mode (`--profile
+minimal`/`deep_dive`) for all 122 CudaBinaryBenchmark targets on GB300, which previously all hit
+failed_profiler. Validated: ch09:cublaslt_gemm_fp4 `--profile minimal` -> successful:1,
+failed_profiler:0, 88-kernel full report (was failed_profiler:1 + a 6-kernel truncated report);
+ch06:add (a simple cuda-binary) -> successful:1, failed_profiler:0. Python no-regression confirmed on
+ch13:quantization and ch10:matmul_tcgen05_pipelined (both BaseBenchmark; failed_profiler:0, the
+python-wrapper path is byte-identical). This is the gateway to per-kernel deep-dive SoL across the
+compiled-binary suite (the plan's Phase 5).
 
 Baseline note (corrected 2026-06-09): baseline_cublaslt_gemm_fp4_sm103 runs FINE standalone (Naive
 Tiled FP4 GEMM 13.63 ms, 10.09 TFLOPS, exit 0). The earlier "-11" was an ncu-profiling/harness
