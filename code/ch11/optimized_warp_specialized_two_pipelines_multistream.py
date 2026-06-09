@@ -106,8 +106,13 @@ class OptimizedDualPipelineBenchmark(VerificationPayloadMixin, BaseBenchmark):
         return BenchmarkConfig(
             iterations=10,
             warmup=5,
-            measurement_timeout_seconds=120,
-            setup_timeout_seconds=120,
+            # The one-time cold JIT compile of this warp-specialized dual-pipeline
+            # multistream kernel takes ~121s on GB300 (the kernel itself then runs
+            # in well under a millisecond). 120s was just too tight for the cold
+            # build, so the first inventory run timed out in setup. 300s covers the
+            # cold compile with headroom; warm-cache runs are instant.
+            measurement_timeout_seconds=300,
+            setup_timeout_seconds=300,
             ncu_replay_mode="application",
             ncu_metric_set="minimal",
             nsys_nvtx_include=[canonicalize_nvtx_name("optimized_dual_pipeline_multistream")],
