@@ -138,16 +138,28 @@ N=7168 / tile_N=64 = 112 col-tiles, so the grid is 112 CTAs and under-fills the
 kernel defect: the CUTLASS NVFP4 path itself is already the well-optimized
 (tensor-core, TMA, blockscaled) implementation.
 
-NEXT LEVER (Grind Mandate, DRAFT until measured): raise the CTA count above the SM
-count to fill the GPU and add a second wave. Two candidates, both per-shape and
-recompile-gated: (a) smaller tile_N (64 -> 32 doubles col-tiles to 224 > 148 SMs);
-(b) split-K across the large K=16384 reduction (more CTAs + an epilogue reduce).
-Production serving stacks pick these per shape via a tile heuristic; the book's
-ch09 example pins one tile to teach the path, so this is a characterization of the
-shape regime, not a defect to patch in the example. The C++ CUTLASS path supports
-sm_103a and runs the NVFP4 tensor cores correctly (the MMA atom above is the FP4
-tensor-core op), so the "utilize the latest hardware" box is checked; the residual
-gap is occupancy at decode-M.
+NEXT LEVER (refined 2026-06-09 by reading the kernel; supersedes the earlier draft):
+raise the CTA count above the SM count to fill the GPU. The earlier draft listed
+(a) "smaller tile_N (64 -> 32)" -- that is INVALID and is RETRACTED: the SM100
+blockscaled NVFP4 1SM MMA constrains `TileShape_N` to {64, 128, 192, 256}
+(`optimized_nvfp4_gemm.cu` lines 144-145, citing
+`sm100_make_blockscaled_1sm_trivial_tiled_mma()`). So tile_N=64 is ALREADY the
+minimum valid tile = the max col-tile count (N=7168/64 = 112 CTAs); tile_N=128 would
+HALVE the CTAs to 56 (worse occupancy). The tile lever is therefore exhausted: among
+the valid tiles, N64 is occupancy-optimal at this shape (which is why the kernel's
+per-shape dispatch already pins the N64C1 lane for decode). The ONLY remaining
+occupancy lever is split-K / StreamK across the large K=16384 reduction (112*S CTAs +
+an epilogue reduce). That is NOT a quick config flip: the kernel is
+`cutlass::gemm::kernel::GemmUniversal<..., void>` (the `void` 4th param = the default
+data-parallel scheduler), so StreamK requires swapping the TileScheduler template
+(a recompile) AND the blockscaled-NVFP4 1SM collective must support partial-K
+accumulation + the StreamK epilogue reduction (compatibility unverified). Production
+serving stacks apply exactly this per-shape (StreamK for under-filled small-M GEMMs);
+the book's example teaches the single dense path. VERDICT: this kernel is at the
+practical H4/P4 ceiling (it IS the production CUTLASS NVFP4 tensor-core path; the MMA
+atom is the FP4 tensor-core op); the decode-M residual is small-M-GEMM shape physics,
+and the only lever (StreamK) is a deep, uncertain, per-shape scheduler change banked
+here rather than patched into a teaching kernel.
 
 Companion data point, the repo's own hand-written tcgen05 dense GEMM
 (`ch10:matmul_tcgen05_vs_cublas`, the educational CUDA-C++ tcgen05 kernel): on
