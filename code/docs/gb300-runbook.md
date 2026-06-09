@@ -538,6 +538,7 @@ verification-passed. Speedups are vs the lab's own naive/baseline arm (the book'
 | --- | --- | --- | --- |
 | cublaslt_gemm_fp4 (ch09) | 706.40x | kernel, FP4 tensor cores, batched+autotuned | ~7107 TFLOPS cuBLASLt NVFP4 (78.68% SM batched, ncu L4) vs 10.09 naive (no TC); skip->pass (TN+swizzle), batched fills GPU 256->2048 tiles (+1.41x), heuristic auto-tune picks rank-3/4 not rank-0 (+7.1%). 4709->7107 (1.51x). Naive-vs-TC headline |
 | nixl_tier_handoff (ch04) | 40.44x | comm, tiered transfer | 92.66 GB/s achieved vs 2.29 naive (measured) |
+| cutlass_gemm_fp16 (ch09) | 32.16x | kernel, Blackwell tensor-core arch port | 1171 TFLOPS = 31.2% FP16 SoL (ncu L4: SM100_MMA_F16BF16 tcgen05 + 2SM TMA; 1.68-wave underfill at fixed 2048^3); was arch::Sm80 Ampere HMMA 440 TFLOPS (11.7%) -> arch::Sm100 collective 1171 (2.66x kernel); harness 12.1x -> 32.16x vs SIMT baseline, verify-passed |
 | nccl (ch04) | 20.27x | comm, right-engine | NCCL vs naive; small-message latency-bound (~0 NVLink BW measured) |
 | cpu_reduction (ch04) | 18.20x | comm, right-engine | GPU vs CPU reduction |
 | grace_blackwell_locality (ch04) | 8.89x | comm, routing | Grace-Blackwell C2C locality |
@@ -596,6 +597,20 @@ SoL framing (B), measured 2026-06-09:
   + maxes occupancy, 1.06x); the width is left as a teaching-premise observation (hbm_copy vs
   float4_vector form a width comparison; 128-bit wins on GB300), flagged for the author rather than
   silently rewritten.
+- Kernel (B5), a Phase-1 discovery-sweep win (un-deep-dived measurable-SoL labs): the ch09 CUTLASS
+  FP16 GEMM (optimized_cutlass_gemm_fp16, M=N=K=2048) declared `cutlass::arch::Sm80`, which on
+  Blackwell compiled the AMPERE HMMA path (ncu: `Mma<GemmShape<16,8,16>...OpMultiplyAdd>` =
+  mma.sync.m16n8k16) at 440 TFLOPS = 11.7% of the 3750 TFLOPS FP16 SoL, underfilled at 0.84 waves/SM.
+  The FP8 sibling already used the CUTLASS 3.x Sm100 collective (GemmUniversalAdapter, TMA 2SM
+  warp-specialized). Porting the FP16 lab to the same Sm100 collective (half_t; RowMajor A / RowMajor
+  B kept so C=A@B and the |C| checksum still match the baseline) moved it to the Blackwell tcgen05
+  path (ncu: `SM100_MMA_F16BF16_2x1SM_SS` + `SM100_TMA_2SM_LOAD`): 440 -> 1171 TFLOPS (2.66x kernel,
+  31.2% FP16 SoL), harness 12.1x -> 32.16x vs the SIMT baseline, verification passed (checksum
+  1.26223e7 matches baseline to 2e-6). It is the same lesson as B3/B4: an "optimized" GB300 lab can
+  silently run a prior-arch path. Still underfill-limited (1.68 waves, 43% SM) at the fixed 2048^3 the
+  A/B requires; next lever (banked, low EV): fill, capped by that shape. The FP8 sibling is already on
+  the Sm100 path (2481 TFLOPS, 6.74 waves at 4096^3); the generic/fp4 CUTLASS labs are next in the
+  sweep.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
