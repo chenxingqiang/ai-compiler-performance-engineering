@@ -361,9 +361,9 @@ wins:
 4. ch18:eos_sync_polling 1.26x.
 
 The first three confirm that earlier source fixes (sm_103a kernels, timeouts) produce real wins once
-their results are actually captured. Gated skips (graceful, not fixable in this image):
-ch09:cublaslt_gemm_fp4 ("SKIPPED: cuBLASLt NVFP4 ...", the image's cuBLASLt lacks the NVFP4 GEMM
-path) and ch10:tcgen05_warpgroup_specialization (kernel skip gate). Informational examples (run and
+their results are actually captured. ch09:cublaslt_gemm_fp4 was a gated skip but is now FIXED +
+PASSING (467.54x, the wrong-transpose/scale-swizzle bug, see "FP4 cuBLASLt unblock" below). The
+remaining gated skip is ch10:tcgen05_warpgroup_specialization (kernel skip gate). Informational examples (run and
 demonstrate a concept, not perf pairs): ch19:nvfp4_training, ch14:cublas_vs_cutlass,
 ch15:inference_placement, ch17:inference_full, ch17:pipeline_parallelism, ch20:pipeline_sequential,
 ch05:ai.
@@ -415,22 +415,32 @@ K-major operands, FP16/BF16 output, VEC16_UE4M3 scales in the SF swizzle layout 
 computes NVFP4 GEMM correctly on GB300; the lab's "unavailable" skip was purely the wrong-transpose
 plus plain-scale config. The working, self-verifying reference is committed at
 [gb300-cublaslt-nvfp4-tn-reference.cu](gb300-cublaslt-nvfp4-tn-reference.cu) (build:
-`nvcc -arch=sm_103a ... -lcublasLt`). The only remaining step is mechanical: apply this proven
-recipe to ch09 optimized_cublaslt_gemm_fp4.cu (A is naturally K-major; re-pack B K-major; swizzle
-both scale tensors; transa=T; FP16 out; handle the batch SF stride), banked with the full recipe
-since GB300's NVFP4 GEMM is independently already at the H4/P4 vendor ceiling via CUTLASS
-labs/nvfp4_gemm.
+`nvcc -arch=sm_103a ... -lcublasLt`).
 
-Baseline note (corrected 2026-06-09): baseline_cublaslt_gemm_fp4_sm103 actually runs FINE
-standalone (Naive Tiled FP4 GEMM 13.63 ms, 10.09 TFLOPS, exit 0). The earlier "-11" was an
-ncu-profiling/harness artifact, not a baseline bug. So the remaining lab port is only the
-optimized side: apply the proven TN+swizzle recipe (committed reference above). The mechanical
-remaining work is to match the optimized binary's A/B input generation to the baseline's so the
-harness checksum verification compares like-for-like, decide kBatchCount (1, or batched only if
-cuBLASLt batched block-scaling is confirmed), and preserve the binary's stdout format
-("cuBLASLt NVFP4 GEMM (tensor cores): <ms> ms" / "Throughput: <tflops> TFLOPS" / checksum). This
-is a mechanical rewrite with zero recipe risk; banked since GB300's NVFP4 GEMM is already at the
-vendor ceiling via CUTLASS labs/nvfp4_gemm and the recipe + a working reference are committed.
+LAB PORTED + PASSING (2026-06-09): ch09 optimized_cublaslt_gemm_fp4.cu now implements the recipe
+end-to-end and the target is flipped from SKIPPED to PASSING. `bench run ch09:cublaslt_gemm_fp4
+--profile none` -> successful:1, failed:0, speedup 467.54x, verification passed. The optimized
+checksum 2.3319485440e9 matches the naive baseline 2.3318361600e9 to 0.0048% (FP32 accumulation
+order + FP16 output rounding only). Measured: cuBLASLt NVFP4 tensor-core GEMM ~0.029 ms/GEMM,
+~4709 TFLOPS, vs the naive tiled baseline 10.09 TFLOPS (the 467x is naive-no-tensor-core vs
+tensor-core, not a tuned-vs-tuned number). What the port does: A (M x K row-major) is already
+K-major; B (K x N) is transposed to N x K so each N-column is K-contiguous; both block-scale
+tensors are written in the SF swizzle; transa=T/transb=N; each of the 8 batches is a single-matrix
+TN matmul, looped (matching the baseline's per-batch kernel loop, so no batched-block-scaling
+dependency). The one non-obvious extra fix beyond the standalone recipe: the A/B scale pointers
+must be set NON-NULL before `cublasLtMatmulAlgoGetHeuristic` (the block-scaled heuristic validates
+them), otherwise it still returns 0 results even in TN; set them to batch 0 pre-heuristic, then
+update per batch.
+
+Under nsys (`--profile minimal`/`deep_dive`) the SAME target reports failed_profiler, but that is a
+generic nsys-on-GB300 artifact, NOT the port: the error is `baseline:nsys:failed,
+optimized:nsys:failed` (nsys returns non-zero but still writes a valid .nsys-rep), and it hits the
+UNCHANGED naive baseline equally. The benchmark itself is status=succeeded with the 467x speedup;
+only the profiler-capture wrapper is red. `--profile none` is the clean correctness+perf verdict.
+
+Baseline note (corrected 2026-06-09): baseline_cublaslt_gemm_fp4_sm103 runs FINE standalone (Naive
+Tiled FP4 GEMM 13.63 ms, 10.09 TFLOPS, exit 0). The earlier "-11" was an ncu-profiling/harness
+artifact, not a baseline bug.
 
 ## GB300 validated wins summary (consolidated, 2026-06-09)
 
@@ -439,6 +449,7 @@ verification-passed. Speedups are vs the lab's own naive/baseline arm (the book'
 
 | Win (chapter) | Speedup | Category | SoL note |
 | --- | --- | --- | --- |
+| cublaslt_gemm_fp4 (ch09) | 467.54x | kernel, FP4 tensor cores | ~4709 TFLOPS cuBLASLt NVFP4 vs 10.09 naive (no TC); skip->pass via TN+scale-swizzle. Naive-vs-TC, not tuned-vs-tuned |
 | nixl_tier_handoff (ch04) | 40.44x | comm, tiered transfer | 92.66 GB/s achieved vs 2.29 naive (measured) |
 | nccl (ch04) | 20.27x | comm, right-engine | NCCL vs naive; small-message latency-bound (~0 NVLink BW measured) |
 | cpu_reduction (ch04) | 18.20x | comm, right-engine | GPU vs CPU reduction |
@@ -484,9 +495,10 @@ needs the TN format (the cublaslt_gemm_fp4 fix above).
 
 Not wins (documented env-gaps / infra-walls / gated-skips, not defects): vllm targets (vllm breaks
 the NGC toolchain), ch04 nvshmem half (runtime/fabric infra-wall: torch bundles nvshmem but the
-single-node torchrun context has no nvshmem launcher/fabric), cublaslt_gemm_fp4 (the wrong-transpose
-bug above, fix recipe known), tcgen05_warpgroup_specialization (kernel skip gate), the informational
-examples (not perf pairs), and the train_distributed remainder (marginal/slow, banked).
+single-node torchrun context has no nvshmem launcher/fabric), tcgen05_warpgroup_specialization
+(kernel skip gate), the informational examples (not perf pairs), and the train_distributed remainder
+(marginal/slow, banked). cublaslt_gemm_fp4 was here as a known-recipe skip; it is now FIXED + PASSING
+(467.54x), moved to the wins.
 
 Net: ch04 is no longer a coverage blind spot. It contributed 12 validated GB300 wins (up to
 40.44x), 5 ties, 3 banked torchrun edge cases, 1 clean skip, and the nvshmem env-gap, plus the

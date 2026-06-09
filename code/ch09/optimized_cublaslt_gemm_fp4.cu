@@ -7,6 +7,17 @@
 // throughput over FP16 using 4-bit precision with per-block scaling.
 //
 // REQUIRES: CUDA 12.9+, Blackwell GPU (SM 10.0+)
+//
+// GB300 recipe (validated, cuBLASLt 13.4 on sm_103). cuBLASLt NVFP4 GEMM needs:
+//   1. TN format: transa=CUBLAS_OP_T, transb=CUBLAS_OP_N, K-major operands, FP16 out.
+//      (an N/N layout returns CUBLAS_STATUS_NOT_SUPPORTED, which is the "unavailable"
+//       skip earlier versions of this lab hit -- it was a layout bug, not a driver gap.)
+//   2. VEC16_UE4M3 block scales in the SF swizzle layout (sfoff() below):
+//      a 512-byte tile of 128 rows x 4 SF-K (CUTLASS/Colfax block16 SF layout).
+// A is M x K row-major == K x M col-major (K-major already); B (K x N) is transposed
+// to N x K so each N-column is K-contiguous (K-major). Each batch is a single-matrix
+// TN matmul, looped (matching the baseline's per-batch kernel loop). Standalone proof
+// + the full derivation: code/docs/gb300-cublaslt-nvfp4-tn-reference.cu.
 
 #include <cuda_runtime.h>
 #include <cublasLt.h>
@@ -45,50 +56,41 @@
 // Block size for NVFP4 scaling (16 elements per scale factor)
 constexpr int FP4_BLOCK_SIZE = 16;
 
-// Quantize float to NVFP4 with block scaling
-// Each 16-element block shares one UE4M3 scale factor
-void quantize_to_nvfp4(const float* input, uint8_t* output_packed, 
-                       __nv_fp8_e4m3* scales,
-                       int rows, int cols) {
-    // FP4 is packed: 2 values per byte
-    const int packed_cols = cols / 2;
-    const int num_scale_cols = cols / FP4_BLOCK_SIZE;
-    
-    for (int r = 0; r < rows; ++r) {
+// Quantize a K x C matrix stored as C columns each with K contiguous elements
+// (src[c*K + k]); pack along K (2 FP4 per byte), one UE4M3 scale per 16-element block.
+// Outputs: packed = C*(K/2) bytes; scales = C*(K/16) UE4M3 bytes in plain [c][sk] order.
+static void quantize_kmajor(const float* src, int K, int C,
+                            uint8_t* packed, uint8_t* scales) {
+    const int SFK = K / FP4_BLOCK_SIZE;
+    for (int c = 0; c < C; ++c) {
         NVTX_RANGE("iteration");
-        for (int block = 0; block < num_scale_cols; ++block) {
+        for (int b = 0; b < SFK; ++b) {
             NVTX_RANGE("iteration");
-            const int block_start = block * FP4_BLOCK_SIZE;
-            
-            // Find max absolute value in this block
             float max_abs = 0.0f;
             for (int i = 0; i < FP4_BLOCK_SIZE; ++i) {
-                NVTX_RANGE("iteration");
-                max_abs = std::max(max_abs, std::abs(input[r * cols + block_start + i]));
+                max_abs = std::max(max_abs, std::fabs(src[(size_t)c * K + b * FP4_BLOCK_SIZE + i]));
             }
-            
-            // Scale factor: map max_abs to FP4 range [-6, 6]
             float scale = (max_abs > 0.0f) ? max_abs / 6.0f : 1.0f;
-            
-            // Store scale as UE4M3 (FP8 E4M3, used unsigned)
-            scales[r * num_scale_cols + block] = __nv_fp8_e4m3(scale);
-            
-            // Quantize values in this block to FP4 (packed 2 per byte)
+            scales[(size_t)c * SFK + b] = __nv_cvt_float_to_fp8(scale, __NV_SATFINITE, __NV_E4M3);
             for (int i = 0; i < FP4_BLOCK_SIZE; i += 2) {
-                NVTX_RANGE("iteration");
-                float v0 = input[r * cols + block_start + i];
-                float v1 = input[r * cols + block_start + i + 1];
-                
-                // Convert to FP4 using CUDA conversion functions
-                __nv_fp4_storage_t fp4_0 = __nv_cvt_float_to_fp4(v0 / scale, __NV_E2M1, cudaRoundNearest);
-                __nv_fp4_storage_t fp4_1 = __nv_cvt_float_to_fp4(v1 / scale, __NV_E2M1, cudaRoundNearest);
-                
-                // Pack two FP4 values into one byte (low nibble = v0, high nibble = v1)
-                int packed_idx = r * packed_cols + (block_start + i) / 2;
-                output_packed[packed_idx] = ((fp4_1 & 0x0F) << 4) | (fp4_0 & 0x0F);
+                float v0 = src[(size_t)c * K + b * FP4_BLOCK_SIZE + i];
+                float v1 = src[(size_t)c * K + b * FP4_BLOCK_SIZE + i + 1];
+                __nv_fp4_storage_t q0 = __nv_cvt_float_to_fp4(v0 / scale, __NV_E2M1, cudaRoundNearest);
+                __nv_fp4_storage_t q1 = __nv_cvt_float_to_fp4(v1 / scale, __NV_E2M1, cudaRoundNearest);
+                packed[((size_t)c * K + b * FP4_BLOCK_SIZE + i) / 2] =
+                    (uint8_t)((q0 & 0x0F) | ((q1 & 0x0F) << 4));
             }
         }
     }
+}
+
+// VEC16_UE4M3 scale-factor swizzle: row r (of `rows`), SF-K index sk, K columns.
+// 512-byte tile of 128 rows x 4 SF-K (CUTLASS/Colfax block16 SF layout). Requires
+// rows % 128 == 0 and (K/16) % 4 == 0.
+static size_t sfoff(int r, int sk, int K) {
+    int RK = (K / FP4_BLOCK_SIZE) / 4;
+    return (size_t)(r / 128) * 512 * RK + (size_t)(sk / 4) * 512 +
+           (size_t)(r % 32) * 16 + (size_t)((r % 128) / 32) * 4 + (size_t)(sk % 4);
 }
 
 int main() {
@@ -97,160 +99,137 @@ int main() {
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     std::cout << "Running on " << prop.name << " (SM" << prop.major << "." << prop.minor << ")" << std::endl;
-    
+
     if (prop.major < 10) {
         std::cerr << "SKIPPED: cuBLASLt NVFP4 requires Blackwell (SM 10.0+)." << std::endl;
         std::cerr << "Detected SM" << prop.major << "." << prop.minor << "." << std::endl;
         return 3;
     }
 
-    // Matrix dimensions - must be aligned to 16 for FP4 block scaling
-    // Using dimensions that are multiples of 16 and 128 for tensor core alignment
+    // Matrix dimensions - must be multiples of 128 (rows, for the SF swizzle tile) and 16.
     constexpr int M = 4096;  // Rows of A and C
-    constexpr int N = 4096;  // Cols of B and C  
+    constexpr int N = 4096;  // Cols of B and C
     constexpr int K = 4096;  // Cols of A, Rows of B
     constexpr int kIterations = 10;
     constexpr int kBatchCount = 8;
-    
-    // Verify alignment
-    static_assert(M % FP4_BLOCK_SIZE == 0, "M must be multiple of 16");
-    static_assert(N % FP4_BLOCK_SIZE == 0, "N must be multiple of 16");
-    static_assert(K % FP4_BLOCK_SIZE == 0, "K must be multiple of 16");
 
-    // FP4 sizes: packed (2 values per byte)
-    const size_t packed_K = K / 2;   // A is MxK, packed along K
-    const size_t packed_N = N / 2;   // B is KxN, packed along N
-    const size_t elements_A_packed = static_cast<size_t>(M) * packed_K;
-    const size_t elements_B_packed = static_cast<size_t>(K) * packed_N;
-    const size_t elements_C = static_cast<size_t>(M) * N;
-    
-    // Scale tensor sizes: one scale per 16 elements along the packed dimension
-    const size_t num_scales_per_row_A = K / FP4_BLOCK_SIZE;
-    const size_t num_scales_per_row_B = N / FP4_BLOCK_SIZE;
-    const size_t num_scales_A = M * num_scales_per_row_A;
-    const size_t num_scales_B = K * num_scales_per_row_B;
-    
-    std::cout << "Matrix dimensions: M=" << M << " N=" << N << " K=" << K << std::endl;
-    std::cout << "FP4 packed sizes: A=" << elements_A_packed << " B=" << elements_B_packed << std::endl;
-    std::cout << "Scale counts: A=" << num_scales_A << " B=" << num_scales_B << std::endl;
+    static_assert(M % 128 == 0, "M must be multiple of 128 for SF swizzle");
+    static_assert(N % 128 == 0, "N must be multiple of 128 for SF swizzle");
+    static_assert((K / FP4_BLOCK_SIZE) % 4 == 0, "K/16 must be multiple of 4 for SF swizzle");
+
+    // Per-batch sizes. A and B are both K-major; packed 2 FP4 per byte.
+    const size_t packedA = (size_t)M * (K / 2);   // A: M cols x K, K-major
+    const size_t packedB = (size_t)N * (K / 2);   // B^T: N cols x K, K-major
+    const size_t scaleA  = (size_t)M * (K / FP4_BLOCK_SIZE);
+    const size_t scaleB  = (size_t)N * (K / FP4_BLOCK_SIZE);
+    const size_t elements_C = (size_t)M * N;
+    const int SFK = K / FP4_BLOCK_SIZE;
+
+    std::cout << "Matrix dimensions: M=" << M << " N=" << N << " K=" << K
+              << " batch=" << kBatchCount << std::endl;
 
     // Host allocation
-    std::vector<float> h_A_fp32(M * K * kBatchCount);
-    std::vector<float> h_B_fp32(K * N * kBatchCount);
-    std::vector<uint8_t> h_A_packed(elements_A_packed * kBatchCount);
-    std::vector<uint8_t> h_B_packed(elements_B_packed * kBatchCount);
-    std::vector<__nv_fp8_e4m3> h_A_scales(num_scales_A * kBatchCount);
-    std::vector<__nv_fp8_e4m3> h_B_scales(num_scales_B * kBatchCount);
+    std::vector<float> h_A_fp32((size_t)M * K * kBatchCount);
+    std::vector<float> h_B_fp32((size_t)K * N * kBatchCount);
+    std::vector<uint8_t> h_A_packed(packedA * kBatchCount);
+    std::vector<uint8_t> h_B_packed(packedB * kBatchCount);
+    std::vector<uint8_t> h_A_scales(scaleA * kBatchCount, 0);  // swizzled
+    std::vector<uint8_t> h_B_scales(scaleB * kBatchCount, 0);  // swizzled
     std::vector<__half> h_C(elements_C * kBatchCount);
 
-    // Initialize with random values
+    // Initialize with random values (identical stream + order to the baseline:
+    // all of A first, then all of B, mt19937(42), uniform[-1,1]).
     std::mt19937 gen(42);
     std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
-    for (auto& v : h_A_fp32) {
-        NVTX_RANGE("setup");
-        v = dis(gen);
-    }
-    for (auto& v : h_B_fp32) {
-        NVTX_RANGE("setup");
-        v = dis(gen);
-    }
-    
-    // Quantize to NVFP4 with block scaling
-    std::cout << "Quantizing matrices to NVFP4..." << std::endl;
+    for (auto& v : h_A_fp32) { NVTX_RANGE("setup"); v = dis(gen); }
+    for (auto& v : h_B_fp32) { NVTX_RANGE("setup"); v = dis(gen); }
+
+    // Quantize to NVFP4 (K-major) + swizzle the block scales, per batch.
+    std::cout << "Quantizing matrices to NVFP4 (TN, K-major) + swizzling scales..." << std::endl;
+    std::vector<float> b_transpose((size_t)N * K);  // reused per batch: B^T (N cols x K)
+    std::vector<uint8_t> sA_plain(scaleA), sB_plain(scaleB);
     for (int batch = 0; batch < kBatchCount; ++batch) {
         NVTX_RANGE("batch");
-        quantize_to_nvfp4(h_A_fp32.data() + batch * M * K,
-                          h_A_packed.data() + batch * elements_A_packed,
-                          h_A_scales.data() + batch * num_scales_A,
-                          M, K);
-        quantize_to_nvfp4(h_B_fp32.data() + batch * K * N,
-                          h_B_packed.data() + batch * elements_B_packed,
-                          h_B_scales.data() + batch * num_scales_B,
-                          K, N);
+        const float* A_b = h_A_fp32.data() + (size_t)batch * M * K;  // M x K row-major == K-major cols
+        const float* B_b = h_B_fp32.data() + (size_t)batch * K * N;  // K x N row-major
+
+        // A is already K-major (each M-row is K contiguous).
+        quantize_kmajor(A_b, K, M, h_A_packed.data() + batch * packedA, sA_plain.data());
+
+        // Transpose B (K x N) -> B^T (N x K) so each N-column is K-contiguous.
+        for (int k = 0; k < K; ++k)
+            for (int n = 0; n < N; ++n)
+                b_transpose[(size_t)n * K + k] = B_b[(size_t)k * N + n];
+        quantize_kmajor(b_transpose.data(), K, N, h_B_packed.data() + batch * packedB, sB_plain.data());
+
+        // Swizzle plain [row][sk] scales into the VEC16_UE4M3 SF layout.
+        uint8_t* sAsw = h_A_scales.data() + batch * scaleA;
+        uint8_t* sBsw = h_B_scales.data() + batch * scaleB;
+        for (int m = 0; m < M; ++m)
+            for (int sk = 0; sk < SFK; ++sk)
+                sAsw[sfoff(m, sk, K)] = sA_plain[(size_t)m * SFK + sk];
+        for (int n = 0; n < N; ++n)
+            for (int sk = 0; sk < SFK; ++sk)
+                sBsw[sfoff(n, sk, K)] = sB_plain[(size_t)n * SFK + sk];
     }
-    
+
     std::fill(h_C.begin(), h_C.end(), __float2half(0.0f));
 
     // Device allocation
-    uint8_t *d_A = nullptr, *d_B = nullptr;
-    __nv_fp8_e4m3 *d_A_scales = nullptr, *d_B_scales = nullptr;
+    uint8_t *d_A = nullptr, *d_B = nullptr, *d_A_scales = nullptr, *d_B_scales = nullptr;
     __half *d_C = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_A, elements_A_packed * kBatchCount));
-    CUDA_CHECK(cudaMalloc(&d_B, elements_B_packed * kBatchCount));
-    CUDA_CHECK(cudaMalloc(&d_A_scales, num_scales_A * kBatchCount * sizeof(__nv_fp8_e4m3)));
-    CUDA_CHECK(cudaMalloc(&d_B_scales, num_scales_B * kBatchCount * sizeof(__nv_fp8_e4m3)));
+    CUDA_CHECK(cudaMalloc(&d_A, packedA * kBatchCount));
+    CUDA_CHECK(cudaMalloc(&d_B, packedB * kBatchCount));
+    CUDA_CHECK(cudaMalloc(&d_A_scales, scaleA * kBatchCount));
+    CUDA_CHECK(cudaMalloc(&d_B_scales, scaleB * kBatchCount));
     CUDA_CHECK(cudaMalloc(&d_C, elements_C * kBatchCount * sizeof(__half)));
 
-    // Copy to device
-    CUDA_CHECK(cudaMemcpy(d_A, h_A_packed.data(), elements_A_packed * kBatchCount, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_B, h_B_packed.data(), elements_B_packed * kBatchCount, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_A_scales, h_A_scales.data(), num_scales_A * kBatchCount * sizeof(__nv_fp8_e4m3), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_B_scales, h_B_scales.data(), num_scales_B * kBatchCount * sizeof(__nv_fp8_e4m3), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_A, h_A_packed.data(), packedA * kBatchCount, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_B, h_B_packed.data(), packedB * kBatchCount, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_A_scales, h_A_scales.data(), scaleA * kBatchCount, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_B_scales, h_B_scales.data(), scaleB * kBatchCount, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_C, h_C.data(), elements_C * kBatchCount * sizeof(__half), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Initialize cuBLASLt
+    // cuBLASLt setup: TN, NVFP4 operands, VEC16_UE4M3 scales, FP32 compute, FP16 out.
     cublasLtHandle_t ltHandle;
     CUBLASLT_CHECK(cublasLtCreate(&ltHandle));
-
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
 
-    // Create matmul descriptor for NVFP4 with FP32 compute
     cublasLtMatmulDesc_t matmulDesc;
     CUBLASLT_CHECK(cublasLtMatmulDescCreate(&matmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
-
-    cublasOperation_t transa = CUBLAS_OP_N;
-    cublasOperation_t transb = CUBLAS_OP_N;
+    cublasOperation_t transa = CUBLAS_OP_T;  // op(A): K x M -> M x K
+    cublasOperation_t transb = CUBLAS_OP_N;  // op(B): K x N
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(transa)));
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb)));
 
-    // Set scale mode to VEC16_UE4M3 (16-element blocks with UE4M3 scale factors)
     cublasLtMatmulMatrixScale_t scaleMode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaleMode, sizeof(scaleMode)));
     CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaleMode, sizeof(scaleMode)));
 
-    // We intentionally use the same col-major reinterpretation strategy as the FP8 path:
-    // operand A uses original B storage, operand B uses original A storage.
-    // Scale pointers must follow that logical operand mapping.
-    void* d_A_scales_ptr = d_B_scales;
-    void* d_B_scales_ptr = d_A_scales;
-    CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &d_A_scales_ptr, sizeof(d_A_scales_ptr)));
-    CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &d_B_scales_ptr, sizeof(d_B_scales_ptr)));
+    // Scale pointers must be non-null at heuristic time for the block-scaled path
+    // (set to batch 0 here; updated per batch in run_batch below).
+    void* as0 = d_A_scales;
+    void* bs0 = d_B_scales;
+    CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &as0, sizeof(as0)));
+    CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &bs0, sizeof(bs0)));
 
-    // Matrix layouts (col-major reinterpretation, consistent with optimized_cublaslt_gemm_fp8.cu).
-    // Note: Leading dimensions / batch strides are expressed in elements (nibbles for FP4), not bytes.
+    // Layouts (col-major): A = K x M (lda=K), B = K x N (ldb=K), C = M x N (ldc=M).
     cublasLtMatrixLayout_t layoutA, layoutB, layoutC;
-    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutA, CUDA_R_4F_E2M1, N, K, N));  // logical A = B_row
-    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutB, CUDA_R_4F_E2M1, K, M, K));  // logical B = A_row
-    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutC, CUDA_R_16F, N, M, N));       // C_row as C_col (NxM)
+    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutA, CUDA_R_4F_E2M1, K, M, K));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutB, CUDA_R_4F_E2M1, K, N, K));
+    CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&layoutC, CUDA_R_16F, M, N, M));
 
-    const int batch_count = kBatchCount;
-    const long long strideA = static_cast<long long>(K) * N;
-    const long long strideB = static_cast<long long>(M) * K;
-    const long long strideC = static_cast<long long>(M) * N;
-    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutA, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideA, sizeof(strideA)));
-    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutB, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideB, sizeof(strideB)));
-    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutC, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideC, sizeof(strideC)));
-    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutA, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)));
-    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutB, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)));
-    CUBLASLT_CHECK(cublasLtMatrixLayoutSetAttribute(layoutC, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch_count, sizeof(batch_count)));
-
-    float alpha = 1.0f;
-    float beta = 0.0f;
-
-    // Workspace allocation
-    size_t workspaceSize = 1024 * 1024 * 64;  // 64MB workspace for FP4
+    float alpha = 1.0f, beta = 0.0f;
+    size_t workspaceSize = 64ull << 20;
     void* d_workspace = nullptr;
     CUDA_CHECK(cudaMalloc(&d_workspace, workspaceSize));
 
-    // Algorithm selection
     cublasLtMatmulPreference_t preference;
     CUBLASLT_CHECK(cublasLtMatmulPreferenceCreate(&preference));
     CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(preference,
-                                                         CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                                                         &workspaceSize,
-                                                         sizeof(workspaceSize)));
+        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
 
     std::cout << "Querying cuBLASLt for NVFP4 algorithm..." << std::endl;
     cublasLtMatmulHeuristicResult_t heuristicResult = {};
@@ -258,31 +237,38 @@ int main() {
     cublasStatus_t heuristicStatus = cublasLtMatmulAlgoGetHeuristic(
         ltHandle, matmulDesc, layoutA, layoutB, layoutC, layoutC,
         preference, 1, &heuristicResult, &returnedResults);
-    
+
     if (heuristicStatus != CUBLAS_STATUS_SUCCESS || returnedResults == 0) {
         std::cerr << "SKIPPED: cuBLASLt NVFP4 algorithm unavailable on this driver/toolchain." << std::endl;
-        std::cerr << "Block-scaled VEC16_UE4M3 requires a native cuBLASLt heuristic for this exact benchmark." << std::endl;
         std::cerr << "Diagnostic heuristic status=" << heuristicStatus
                   << ", returned_results=" << returnedResults << "." << std::endl;
-        std::cerr << "This benchmark intentionally does not fall back to non-block-scaled FP4." << std::endl;
         return 3;
     }
 
     std::cout << "NVFP4 GEMM algorithm found, running benchmark..." << std::endl;
 
-    // Warmup
-    {
-        NVTX_RANGE("compute_math:ltmatmul");
+    // Per-batch single-matrix matmul (mirrors the baseline's per-batch kernel loop).
+    auto run_batch = [&](int batch) {
+        void* as = d_A_scales + (size_t)batch * scaleA;
+        void* bs = d_B_scales + (size_t)batch * scaleB;
+        CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &as, sizeof(as)));
+        CUBLASLT_CHECK(cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &bs, sizeof(bs)));
         CUBLASLT_CHECK(cublasLtMatmul(ltHandle, matmulDesc,
-                                       &alpha,
-                                       d_B, layoutA,
-                                       d_A, layoutB,
-                                       &beta,
-                                       d_C, layoutC,
-                                       d_C, layoutC,
-                                       &heuristicResult.algo,
-                                       d_workspace, workspaceSize,
-                                       stream));
+                                      &alpha,
+                                      d_A + (size_t)batch * packedA, layoutA,
+                                      d_B + (size_t)batch * packedB, layoutB,
+                                      &beta,
+                                      d_C + (size_t)batch * elements_C, layoutC,
+                                      d_C + (size_t)batch * elements_C, layoutC,
+                                      &heuristicResult.algo,
+                                      d_workspace, workspaceSize,
+                                      stream));
+    };
+
+    // Warmup
+    for (int batch = 0; batch < kBatchCount; ++batch) {
+        NVTX_RANGE("compute_math:ltmatmul");
+        run_batch(batch);
     }
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -290,20 +276,13 @@ int main() {
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
 
-    // Timed section
     CUDA_CHECK(cudaEventRecord(start, stream));
     for (int iter = 0; iter < kIterations; ++iter) {
-        NVTX_RANGE("compute_math:ltmatmul");
-        CUBLASLT_CHECK(cublasLtMatmul(ltHandle, matmulDesc,
-                                       &alpha,
-                                       d_B, layoutA,
-                                       d_A, layoutB,
-                                       &beta,
-                                       d_C, layoutC,
-                                       d_C, layoutC,
-                                       &heuristicResult.algo,
-                                       d_workspace, workspaceSize,
-                                       stream));
+        NVTX_RANGE("batch");
+        for (int batch = 0; batch < kBatchCount; ++batch) {
+            NVTX_RANGE("compute_math:ltmatmul");
+            run_batch(batch);
+        }
     }
     CUDA_CHECK(cudaEventRecord(stop, stream));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -311,11 +290,10 @@ int main() {
     float total_ms = 0.0f;
     CUDA_CHECK(cudaEventElapsedTime(&total_ms, start, stop));
     const float avg_ms = total_ms / static_cast<float>(kIterations * kBatchCount);
-    
-    // Calculate TFLOPS
+
     const double flops = 2.0 * M * N * K * kBatchCount * kIterations;
     const double tflops = flops / (total_ms * 1e9);
-    
+
     std::cout << "cuBLASLt NVFP4 GEMM (tensor cores): " << avg_ms << " ms" << std::endl;
     std::cout << "Throughput: " << tflops << " TFLOPS" << std::endl;
 
