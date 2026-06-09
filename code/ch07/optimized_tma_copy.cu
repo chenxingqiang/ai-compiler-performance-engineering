@@ -222,20 +222,37 @@ __global__ void descriptor_tma_2d_copy_kernel(
     const int tid = threadIdx.y * blockDim.x + threadIdx.x;
     const int threads = blockDim.x * blockDim.y;
 
-    for (int i = tid; i < tile_elems; i += threads) {
-        const int local_row = i / tile_cols;
-        const int local_col = i % tile_cols;
-        const int near_linear = min(i + 1, tile_elems - 1);
-        const int far_linear = min(i + kLookahead, tile_elems - 1);
-        const int near_row = near_linear / tile_cols;
-        const int near_col = near_linear % tile_cols;
-        const int far_row = far_linear / tile_cols;
-        const int far_col = far_linear % tile_cols;
+    if (tile_cols == TILE_N && tile_rows == TILE_M) {
+        // Full-tile fast path. The generic loop divides by the RUNTIME tile_cols, which the
+        // compiler cannot strength-reduce, so this copy kernel was compute-bound on integer
+        // division (ncu: SM 71% / DRAM 25%) instead of memory-bound. TILE_N is a compile-time
+        // power of two, so these / and % fold to shift/mask; the indices are identical.
+        constexpr int kFull = TILE_M * TILE_N;
+        for (int i = tid; i < kFull; i += threads) {
+            const unsigned ui = static_cast<unsigned>(i);
+            const unsigned un = static_cast<unsigned>(min(i + 1, kFull - 1));
+            const unsigned uf = static_cast<unsigned>(min(i + kLookahead, kFull - 1));
+            output_tile[ui / TILE_N][ui % TILE_N] = combine_values(
+                tile[ui / TILE_N][ui % TILE_N],
+                tile[un / TILE_N][un % TILE_N],
+                tile[uf / TILE_N][uf % TILE_N]);
+        }
+    } else {
+        for (int i = tid; i < tile_elems; i += threads) {
+            const int local_row = i / tile_cols;
+            const int local_col = i % tile_cols;
+            const int near_linear = min(i + 1, tile_elems - 1);
+            const int far_linear = min(i + kLookahead, tile_elems - 1);
+            const int near_row = near_linear / tile_cols;
+            const int near_col = near_linear % tile_cols;
+            const int far_row = far_linear / tile_cols;
+            const int far_col = far_linear % tile_cols;
 
-        output_tile[local_row][local_col] = combine_values(
-            tile[local_row][local_col],
-            tile[near_row][near_col],
-            tile[far_row][far_col]);
+            output_tile[local_row][local_col] = combine_values(
+                tile[local_row][local_col],
+                tile[near_row][near_col],
+                tile[far_row][far_col]);
+        }
     }
     __syncthreads();
 

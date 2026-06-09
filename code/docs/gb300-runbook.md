@@ -509,6 +509,18 @@ SoL framing (B), measured 2026-06-09:
   nowhere near the 1.8 TB/s NVLink ceiling. That is expected (the win is algorithmic/latency, not
   bandwidth saturation), not a BW-headroom lever. nixl 92.66 GB/s is a C2C/tiered path (about 10%
   of the ~900 GB/s Grace-Blackwell C2C).
+- Memory (B3), a Phase-5 deep-dive win (enabled by the harness profiler-mode fix above, which makes
+  nsys/ncu work on cuda-binary targets): measuring %SoL across the ch07 memory targets found a REAL
+  fixable gap, not just a teaching cap. optimized_tma_copy's 2D TMA kernel ran at 39.2% HBM SoL (3136
+  GB/s) while the float4_vector copy hits 89.8% (7181 GB/s). ncu localized it: DRAM 25% / SM 71%, i.e.
+  compute-bound not memory-bound, because the per-element stencil divided by the RUNTIME tile_cols (6
+  integer div/mod per element, which the compiler cannot strength-reduce). Fix: a full-tile fast path
+  using the compile-time TILE_N (a power of two, so / and % fold to shift/mask; indices identical).
+  Result: 39.2% -> 63.7% HBM SoL (3136 -> 5098 GB/s, 1.63x), ncu-confirmed (DRAM 25%->42%, SM
+  71%->52%, duration 43.6->25.6 us); the harness ch07:tma_copy target stays green. Next lever (banked):
+  the residual gap to ~90% is the single-tile barrier serialization + Long Scoreboard smem latency; a
+  double-buffered multi-tile TMA pipeline could close it but is smem-limited (32 KB/block -> 6
+  blocks/SM, and double-buffering lowers occupancy), so the EV is uncertain.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
