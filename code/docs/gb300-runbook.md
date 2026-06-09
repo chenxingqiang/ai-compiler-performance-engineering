@@ -271,3 +271,12 @@ microbench, so 180s covers a cold compile and the fast measurement while failing
 hang ~10x sooner). For resilient unattended inventory runs on GB300, prefer a tight
 per-target `measurement_timeout` and `timeout_multiplier=1` so any hang fails fast
 instead of eating the per-chapter wall-clock budget.
+
+Generic guard: `docs/gb300-inventory-watchdog.sh` reaps ANY hung target during a
+long `bench run` inventory, not just this one. It watches the run-progress
+snapshot's embedded `timestamp`; when it stops advancing for `FREEZE_LIMIT` (default
+600s) it kills the hung `isolated_runner` so the parent loop records a failure and
+advances. It uses the frozen-timestamp signal (not a wall-clock age), so a
+slow-but-progressing target (including a long training lab) is never killed; only a
+genuinely stuck worker is. Run it alongside an unattended inventory:
+`bash docs/gb300-inventory-watchdog.sh &`.
