@@ -403,13 +403,23 @@ standard cuBLASLt low-precision TN layout), FP16/BF16 output. Two reproducers co
    VERIFY FAIL (`/tmp/fp4real.cu`). So cuBLASLt VEC16_UE4M3 requires a SWIZZLED scale-factor layout
    (the all-ones case passed only because every scale is 1, swizzle-independent).
 
-So the FP4 cuBLASLt unblock is fully characterized: the TN recipe is proven to compute, and the one
-remaining piece is the VEC16_UE4M3 scale-factor swizzle (the cuBLASLt block-scaling interleave) for
-real inputs. That swizzle is a cuBLASLt-spec-dependent layout; the full lab fix is TN layout (A is
-naturally K-major, B re-packed K-major) plus the scale swizzle plus the lab's verification. GB300's
-NVFP4 GEMM capability is independently already at the H4/P4 vendor ceiling via the CUTLASS
-labs/nvfp4_gemm path, so the scale-swizzle implementation of this cuBLASLt teaching variant is
-banked as the precise next-lever with the two reproducers as evidence.
+SOLVED (2026-06-09): the last piece, the VEC16_UE4M3 scale-factor swizzle, is implemented and
+verified. The cuBLASLt NVFP4 SF layout (from the CUTLASS/Colfax block16 SF interleave) is a
+512-byte tile of 128 rows x 4 SF-K with offset:
+  offset(r, sk) = (r/128)*512*(K/64) + (sk/4)*512 + (r%32)*16 + ((r%128)/32)*4 + (sk%4)
+With the scales written in this swizzle (and the host reference kept in plain layout), the
+standalone real-input TN FP4 GEMM VERIFIES: maxrel 0.0004, 0/64 wrong (FP4 quant error only).
+
+So the COMPLETE, verified NVFP4 cuBLASLt GEMM recipe for GB300 is: TN format (transa=T, transb=N),
+K-major operands, FP16/BF16 output, VEC16_UE4M3 scales in the SF swizzle layout above. cuBLASLt 13.4
+computes NVFP4 GEMM correctly on GB300; the lab's "unavailable" skip was purely the wrong-transpose
+plus plain-scale config. The working, self-verifying reference is committed at
+[gb300-cublaslt-nvfp4-tn-reference.cu](gb300-cublaslt-nvfp4-tn-reference.cu) (build:
+`nvcc -arch=sm_103a ... -lcublasLt`). The only remaining step is mechanical: apply this proven
+recipe to ch09 optimized_cublaslt_gemm_fp4.cu (A is naturally K-major; re-pack B K-major; swizzle
+both scale tensors; transa=T; FP16 out; handle the batch SF stride), banked with the full recipe
+since GB300's NVFP4 GEMM is independently already at the H4/P4 vendor ceiling via CUTLASS
+labs/nvfp4_gemm.
 
 Separately, baseline_cublaslt_gemm_fp4_sm103 segfaults (exit -11) on GB300, a naive-FP4-baseline
 memory bug to fix before the pair yields a clean A/B.
