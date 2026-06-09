@@ -485,6 +485,14 @@ occupancy). Verification preserved (checksum 2.33195e9, identical to the single-
 ch09:cublaslt_gemm_fp4 --profile none green). 78.68% SM is near the well-fed tensor-core ceiling for
 this shape, so the FP4 signature path is now SoL-grounded AND filled.
 
+HEURISTIC AUTO-TUNE (2026-06-09): cuBLASLt's first-ranked heuristic is NOT the fastest for this shape.
+Requesting the top-8 candidates and timing each (auto-tune, then use the fastest) selects candidate
+#3/#4, not #0, lifting 6634.69 -> ~7107 TFLOPS (+7.1%), harness speedup 655.40x -> 706.39x vs naive.
+Verification preserved (checksum identical; harness green). So the full FP4 GEMM arc is 4709
+(single-matrix, rank-0 algo) -> 6635 (batched) -> ~7107 TFLOPS (batched + auto-tuned), a 1.51x lift
+over the original passing lab, all at verified parity. Teaching point: benchmark the heuristic
+candidates; do not assume rank-0 is optimal.
+
 ## GB300 validated wins summary (consolidated, 2026-06-09)
 
 The wins surfaced from previously-untested coverage on the 4-GPU GB300 node, all
@@ -492,7 +500,7 @@ verification-passed. Speedups are vs the lab's own naive/baseline arm (the book'
 
 | Win (chapter) | Speedup | Category | SoL note |
 | --- | --- | --- | --- |
-| cublaslt_gemm_fp4 (ch09) | 655.40x | kernel, FP4 tensor cores, batched | 6635 TFLOPS @ 78.68% SM (ncu L4) cuBLASLt NVFP4 batched vs 10.09 naive (no TC); skip->pass via TN+swizzle, then batched fills the GPU 256->2048 tiles (+1.41x over single-matrix). Naive-vs-TC headline |
+| cublaslt_gemm_fp4 (ch09) | 706.40x | kernel, FP4 tensor cores, batched+autotuned | ~7107 TFLOPS cuBLASLt NVFP4 (78.68% SM batched, ncu L4) vs 10.09 naive (no TC); skip->pass (TN+swizzle), batched fills GPU 256->2048 tiles (+1.41x), heuristic auto-tune picks rank-3/4 not rank-0 (+7.1%). 4709->7107 (1.51x). Naive-vs-TC headline |
 | nixl_tier_handoff (ch04) | 40.44x | comm, tiered transfer | 92.66 GB/s achieved vs 2.29 naive (measured) |
 | nccl (ch04) | 20.27x | comm, right-engine | NCCL vs naive; small-message latency-bound (~0 NVLink BW measured) |
 | cpu_reduction (ch04) | 18.20x | comm, right-engine | GPU vs CPU reduction |

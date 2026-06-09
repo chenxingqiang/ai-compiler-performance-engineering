@@ -246,12 +246,16 @@ int main() {
     CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(preference,
         CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
 
-    std::cout << "Querying cuBLASLt for NVFP4 algorithm..." << std::endl;
-    cublasLtMatmulHeuristicResult_t heuristicResult = {};
+    // Request the top-K candidate algorithms (not just the first). cuBLASLt's first-ranked
+    // heuristic is not always the fastest for a given shape, so auto-tune: time each candidate
+    // and pick the fastest for the official run.
+    std::cout << "Querying cuBLASLt for NVFP4 algorithms..." << std::endl;
+    constexpr int kMaxAlgos = 8;
+    cublasLtMatmulHeuristicResult_t heuristicResults[kMaxAlgos] = {};
     int returnedResults = 0;
     cublasStatus_t heuristicStatus = cublasLtMatmulAlgoGetHeuristic(
         ltHandle, matmulDesc, layoutA, layoutB, layoutC, layoutC,
-        preference, 1, &heuristicResult, &returnedResults);
+        preference, kMaxAlgos, heuristicResults, &returnedResults);
 
     if (heuristicStatus != CUBLAS_STATUS_SUCCESS || returnedResults == 0) {
         std::cerr << "SKIPPED: cuBLASLt NVFP4 algorithm unavailable on this driver/toolchain." << std::endl;
@@ -260,23 +264,39 @@ int main() {
         return 3;
     }
 
-    std::cout << "NVFP4 GEMM algorithm found, running benchmark..." << std::endl;
-
-    // One batched matmul over all kBatchCount matrices. cuBLASLt strides the operands, C, AND the
-    // per-batch block-scale pointers (set once above); d_A/d_B/d_C/d_A_scales/d_B_scales are each
-    // laid out per-batch contiguous to match the strides.
-    auto run_batched = [&]() {
+    // One batched matmul over all kBatchCount matrices with a chosen algo. cuBLASLt strides the
+    // operands, C, AND the per-batch block-scale pointers (set once above); d_A/d_B/d_C and the
+    // scale buffers are each laid out per-batch contiguous to match the strides.
+    auto run_with = [&](const cublasLtMatmulAlgo_t* algo) {
         CUBLASLT_CHECK(cublasLtMatmul(ltHandle, matmulDesc,
-                                      &alpha,
-                                      d_A, layoutA,
-                                      d_B, layoutB,
-                                      &beta,
-                                      d_C, layoutC,
-                                      d_C, layoutC,
-                                      &heuristicResult.algo,
-                                      d_workspace, workspaceSize,
-                                      stream));
+                                      &alpha, d_A, layoutA, d_B, layoutB,
+                                      &beta, d_C, layoutC, d_C, layoutC,
+                                      algo, d_workspace, workspaceSize, stream));
     };
+
+    // Auto-tune over the returned candidates: warmup + a few timed iters each, pick the fastest.
+    cudaEvent_t tstart, tstop;
+    CUDA_CHECK(cudaEventCreate(&tstart));
+    CUDA_CHECK(cudaEventCreate(&tstop));
+    int bestIdx = 0;
+    float bestMs = 1e30f;
+    for (int a = 0; a < returnedResults; ++a) {
+        run_with(&heuristicResults[a].algo);  // warmup
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(cudaEventRecord(tstart, stream));
+        for (int w = 0; w < 3; ++w) run_with(&heuristicResults[a].algo);
+        CUDA_CHECK(cudaEventRecord(tstop, stream));
+        CUDA_CHECK(cudaEventSynchronize(tstop));
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, tstart, tstop));
+        if (ms < bestMs) { bestMs = ms; bestIdx = a; }
+    }
+    CUDA_CHECK(cudaEventDestroy(tstart));
+    CUDA_CHECK(cudaEventDestroy(tstop));
+    std::cout << "NVFP4 GEMM: auto-tuned over " << returnedResults
+              << " candidate(s), selected #" << bestIdx << ", running benchmark..." << std::endl;
+    const cublasLtMatmulAlgo_t* bestAlgo = &heuristicResults[bestIdx].algo;
+    auto run_batched = [&]() { run_with(bestAlgo); };
 
     // Warmup
     {
