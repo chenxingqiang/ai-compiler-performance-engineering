@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -86,9 +87,12 @@ def _probe_tma_compiler_support(sm_tag: str) -> Tuple[bool, Optional[str]]:
         )
         if code == 0:
             return True, None
-        # Blackwell ptxas requires the 'a' suffix for TMA instructions; retry if applicable
-        if sm_tag == "100" and sm_name != "100a":
-            sm_name = "100a"
+        # Blackwell ptxas requires the architecture-specific 'a' suffix for TMA /
+        # tensormap instructions. Retry with the 'a' variant for ANY Blackwell SM
+        # (sm_100 -> sm_100a, sm_103 -> sm_103a). Without the sm_103 retry, GB300
+        # is wrongly reported TMA-unsupported and every TMA lab skips.
+        if sm_tag.startswith("10") and not sm_name.endswith("a"):
+            sm_name = f"{sm_tag}a"
             ptx = ptx.replace(f"sm_{sm_tag}", f"sm_{sm_name}")
             ptx_path.write_text(ptx)
             code, _, err = _run_command(
@@ -215,12 +219,26 @@ def _query_cluster_launch(device_index: int) -> Optional[int]:
         return None
 
 
+def _is_grace_host() -> bool:
+    """True when the host CPU is Grace (ARM), i.e. a coherent Grace-Blackwell node."""
+    return platform.machine().lower() in ("aarch64", "arm64")
+
+
+def _has_grace_coherence(props) -> bool:
+    """Grace-Blackwell coherent memory: a Grace (ARM) host with a Blackwell-class
+    GPU. GB200/GB300 report CC 10.x; GB10 reports CC 12.x. A non-Grace (x86)
+    B200/B300 has no NVLink-C2C coherent fabric."""
+    if props.major >= 12:
+        return True
+    return props.major >= 10 and _is_grace_host()
+
+
 def _build_features(props) -> List[str]:
     features: List[str] = []
     if props.major >= 10:
         features.append("HBM3e")
         features.append("Stream-ordered memory APIs")
-    if props.major >= 12:
+    if _has_grace_coherence(props):
         features.append("NVLink-C2C")
         features.append("Grace-Blackwell coherence fabric")
     return features
@@ -269,7 +287,13 @@ def _probe_device(device_index: int) -> Dict[str, Any]:
         "device_index": device_index,
         "name": props.name,
         "key": f"sm_{props.major}{props.minor}",
-        "architecture": "grace_blackwell" if props.major >= 12 else ("blackwell" if props.major >= 10 else "hopper" if props.major >= 9 else "other"),
+        "architecture": (
+            "grace_blackwell" if props.major >= 12
+            else "blackwell_ultra" if (props.major == 10 and props.minor >= 3)
+            else "blackwell" if props.major >= 10
+            else "hopper" if props.major >= 9
+            else "other"
+        ),
         "compute_capability": f"{props.major}.{props.minor}",
         "total_memory_gb": props.total_memory / (1024 ** 3),
         "num_sms": props.multi_processor_count,
@@ -283,8 +307,8 @@ def _probe_device(device_index: int) -> Dict[str, Any]:
         "tensor_cores": tensor_core_desc,
         "memory_bandwidth_tbps": None,
         "max_unified_memory_tb": 30 if props.major >= 12 else None,
-        "nvlink_c2c": props.major >= 12,
-        "grace_coherence": props.major >= 12,
+        "nvlink_c2c": _has_grace_coherence(props),
+        "grace_coherence": _has_grace_coherence(props),
         "notes": [],
         "tma": {
             "supported": tma_supported,

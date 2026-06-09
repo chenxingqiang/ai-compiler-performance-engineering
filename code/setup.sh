@@ -5,10 +5,12 @@
 # ========================================
 #
 # This script installs EVERYTHING you need:
-#   1. NVIDIA Driver 580.126.09 (auto-upgrades if needed; open kernel modules for B200)
-#   2. Python 3.12 (PyTorch 2.10-dev compatible)
+#   1. NVIDIA Driver 580.126.09 (auto-upgrades if needed; open kernel modules for B200/B300)
+#   2. Python 3.12
 #   3. CUDA 13.0.2 toolkit + cuBLAS 13.1.0.3 (Update 2) repository
-#   4. Environment for PyTorch 2.10-dev source build with CUDA 13.0.2
+#   4. The canonical PyTorch/Triton stack pinned in requirements_latest.txt
+#      (torch==2.9.1+cu130, triton==3.5.0) for CUDA 13.0.2; versions are
+#      single-sourced from requirements_latest.txt, not the nightly defaults below
 #   5. NVIDIA Nsight Systems 2025.3.2 (for timeline profiling)
 #   6. NVIDIA Nsight Compute 2025.3.1 (for kernel metrics)
 #   7. All Python dependencies from requirements_latest.txt
@@ -1744,12 +1746,18 @@ REQUIREMENTS_FILE="$PROJECT_ROOT/requirements_latest.txt"
 # This keeps setup-time ABI checks aligned with runtime benchmark checks.
 if [ -f "$REQUIREMENTS_FILE" ]; then
     REQ_TORCH_VERSION="$(grep -E '^torch==' "$REQUIREMENTS_FILE" | head -n 1 | cut -d= -f3 || true)"
+    REQ_TRITON_VERSION="$(grep -E '^triton==' "$REQUIREMENTS_FILE" | head -n 1 | cut -d= -f3 || true)"
     REQ_VLLM_VERSION="$(grep -E '^vllm==' "$REQUIREMENTS_FILE" | head -n 1 | cut -d= -f3 || true)"
     REQ_FLASHINFER_VERSION="$(grep -E '^flashinfer-python==' "$REQUIREMENTS_FILE" | head -n 1 | cut -d= -f3 || true)"
 
     if [ -n "${REQ_TORCH_VERSION}" ]; then
         PYTORCH_TORCH_VERSION="${REQ_TORCH_VERSION}"
         PYTORCH_TORCHAUDIO_VERSION="${REQ_TORCH_VERSION}"
+    fi
+    # Single-source Triton too so setup-time installs match the requirements pin
+    # (requirements pins triton==3.5.0; the default above is a 3.6 nightly).
+    if [ -n "${REQ_TRITON_VERSION}" ]; then
+        PYTORCH_TRITON_VERSION="${REQ_TRITON_VERSION}"
     fi
     if [ -n "${REQ_VLLM_VERSION}" ]; then
         VLLM_PIP_SPEC="vllm==${REQ_VLLM_VERSION}"
@@ -1760,6 +1768,7 @@ if [ -f "$REQUIREMENTS_FILE" ]; then
 
     echo "Serving stack pins (from requirements_latest.txt):"
     echo "  torch==${PYTORCH_TORCH_VERSION}"
+    echo "  triton==${PYTORCH_TRITON_VERSION}"
     echo "  ${VLLM_PIP_SPEC}"
     echo "  flashinfer-python==${FLASHINFER_EXPECTED_VERSION}"
 fi

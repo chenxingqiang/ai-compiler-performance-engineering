@@ -67,11 +67,14 @@ def _tcgen05_cuda_flags() -> list[str]:
     ]
     for inc in _CUTLASS_INCLUDES:
         flags.append(f"-I{inc}")
-    # For SM100 (Blackwell), we need sm_100a to enable tcgen05/TMEM features
-    # The 'a' suffix enables architecture-specific features
+    # For Blackwell we need the architecture-specific 'a' suffix to enable
+    # tcgen05/TMEM. Blackwell Ultra (CC 10.3, GB300/B300) is sm_103a; an sm_100a
+    # cubin is architecture-locked and will NOT load on an sm_103 device, so the
+    # exact target matters. Base Blackwell (CC 10.0, B200/GB200) stays sm_100a.
     major, minor = _current_compute_capability()
-    if major >= 10:
-        # Use sm_100a for Blackwell to enable TMEM/tcgen05 features
+    if major == 10 and minor >= 3:
+        flags.append("-gencode=arch=compute_103a,code=sm_103a")
+    elif major >= 10:
         flags.append("-gencode=arch=compute_100a,code=sm_100a")
     else:
         # Fallback for older architectures

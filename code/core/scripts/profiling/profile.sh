@@ -92,9 +92,21 @@ resolve_architecture() {
     fi
 
     local detected="sm_100"
+    # Prefer the shared SM detector; it maps CC 10.3 -> sm_103 (Blackwell Ultra /
+    # GB300) and CC 10.0 -> sm_100 (B200/GB200), so it is GB300-correct.
+    local probed
+    probed=$(PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON_DEFAULT" -m core.benchmark.detect_sm 2>/dev/null || true)
+    if [[ "$probed" =~ ^sm_[0-9]+a?$ ]]; then
+        echo "$probed"
+        return
+    fi
     if command -v nvidia-smi >/dev/null 2>&1; then
         local gpu_name
         gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1 || true)
+        if [[ -n "$gpu_name" && "$gpu_name" =~ (B300|GB300) ]]; then
+            echo "sm_103"
+            return
+        fi
         if [[ -n "$gpu_name" && ! "$gpu_name" =~ (B200|B300) ]]; then
             echo "sm_100"
             echo "⚠ Non-Blackwell GPU detected (${gpu_name}); defaulting to sm_100" >&2

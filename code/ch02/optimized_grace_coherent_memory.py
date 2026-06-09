@@ -120,13 +120,16 @@ class OptimizedGraceCoherentMemory:
     def _detect_grace_blackwell(self) -> bool:
         """Detect if running on Grace-Blackwell platform."""
         try:
+            import platform
             props = torch.cuda.get_device_properties(0)
-            # GB200/GB300 has compute capability 12.1
-            if props.major == 12 and props.minor == 1:
-                # Additional check for Grace CPU (ARM architecture)
-                import platform
-                if platform.machine() in ['aarch64', 'arm64']:
-                    return True
+            is_arm_host = platform.machine() in ('aarch64', 'arm64')
+            # Grace-Blackwell coherent memory needs a Grace (ARM) host paired with
+            # a Blackwell-class GPU. GB200/GB300 GPUs report CC 10.x (B200=10.0,
+            # B300=10.3); GB10 reports CC 12.x. A non-Grace (x86) B200/B300 host has
+            # no NVLink-C2C coherent fabric, so the ARM host check is the
+            # discriminator. The old CC==12.1 check wrongly skipped real GB300.
+            if is_arm_host and props.major >= 10:
+                return True
         except Exception as e:
             logger.debug(f"Grace-Blackwell detection failed: {e}")
         
