@@ -40,6 +40,7 @@ def load_cutlass_gemm():
             f"-I{cutlass_inc}",
             f"-I{cutlass_util_inc}",
             "-gencode=arch=compute_100a,code=sm_100a",
+            "-gencode=arch=compute_103a,code=sm_103a",
             "--use_fast_math",
             "--expt-relaxed-constexpr",
         ],

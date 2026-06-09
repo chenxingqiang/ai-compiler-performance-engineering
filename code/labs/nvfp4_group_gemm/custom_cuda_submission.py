@@ -129,6 +129,8 @@ def load_custom_cuda_nvfp4_group_gemm(*, verbose: bool = False) -> object:
         "-lineinfo",
         "-gencode=arch=compute_100a,code=sm_100a",
         "-gencode=arch=compute_100a,code=compute_100a",
+        "-gencode=arch=compute_103a,code=sm_103a",
+        "-gencode=arch=compute_103a,code=compute_103a",
     ]
     # Compile-time tuning knobs (kept explicit to avoid global default drift).
     # These control constexprs in `custom_cuda_group_gemm_kernel.cu`; compile-config hashing in

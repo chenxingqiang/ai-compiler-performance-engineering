@@ -1095,6 +1095,7 @@ def _load_inline_or_cached_library(name: str, src: str) -> None:
         extra_cuda_cflags=[
             "-O3",
             "-gencode=arch=compute_100a,code=sm_100a",
+            "-gencode=arch=compute_103a,code=sm_103a",
             "--use_fast_math",
             "--expt-relaxed-constexpr",
             "--relocatable-device-code=false",

@@ -42,6 +42,8 @@ def load_tcgen05_module():
         "-std=c++20",
         "-gencode=arch=compute_100a,code=sm_100a",
         "-gencode=arch=compute_100f,code=sm_100f",
+        "-gencode=arch=compute_103a,code=sm_103a",
+        "-gencode=arch=compute_103f,code=sm_103f",
         "-lineinfo",
         # CUTLASS/CUTE headers can conflict with framework headers. These toggles
         # disable debug-only or prefetch-only code paths and help keep builds

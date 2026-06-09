@@ -240,6 +240,36 @@ relL2 ~1.4 / "numerically wrong"; that was a wrong-reference test error: the
 kernel computes `A[M,K] @ B[N,K]^T` with shape constraints `m%128==0, n%256==0,
 k%64==0`, so the reference must be `a @ b.T`, not `a @ b`. Superseded.)
 
+## sm_100a hardcode in lab loaders (the Phase-0 fix was incomplete)
+
+Found 2026-06-09 (the loop surfaced `ch10:matmul_tcgen05_pipelined` failing with
+`CUDA error: no kernel image is available for execution on the device`). The
+Phase-0 `sm_103a` fix only covered `core/common/tcgen05/__init__.py`, but the
+gencode hardcode `-gencode=arch=compute_100a,code=sm_100a` is duplicated across the
+lab CUDA loaders. An sm_100a cubin is arch-locked and will NOT load on sm_103
+(GB300), so every lab that compiles its kernel through one of these loaders fails
+with "no kernel image" on GB300 when the loop reaches the labs phase.
+
+Fixed (6 active loaders) so they build a fat binary that loads on BOTH B200 (sm_100)
+and GB300 (sm_103). The two shapes:
+- Loaders with a `get_device_capability()` guard (`tcgen05_loader.py`): emit
+  sm_103a on CC 10.3, else sm_100a (matches the core/common/tcgen05 fix).
+- Static `extra_cuda_cflags` lists (`cutlass_gemm/__init__.py` + its CMakeLists,
+  `fullstack_cluster/capstone_extension_tcgen05.py`,
+  `nvfp4_group_gemm/custom_cuda_submission.py`, `nvfp4_gemm/optimized_submission.py`,
+  `nvfp4_dual_gemm/optimized_submission.py`): ADD the sm_103a gencode next to the
+  sm_100a one (fat binary; no device branch needed in scope).
+
+Validated on GB300 (clear stale cache + recompile): `matmul_tcgen05_pipelined` runs
+correct (12288^2), and `nvfp4_gemm` compiles + runs with no kernel-image error.
+The remaining four loaders use the identical gencode mechanism so the same fix
+applies; the loop exercises them in the labs phase (guarded by the watchdog below).
+
+Not fixed (intentionally): the ~24 nvfp4_dual_gemm competition-submission ARCHIVES
+(`top_submission_candidates/`, `modal697_candidates/`, `submission_*`, `cand_*`)
+carry the same latent hardcode but are reference variants the inventory does not
+run. Bulk-apply the same one-line gencode addition if any is ever activated.
+
 ## GB300 hazard: intermittent tcgen05 cluster-graph hang + slow hang-detection
 
 Found 2026-06-09 during the inventory loop: `ch10:tcgen05_cluster_pipeline`

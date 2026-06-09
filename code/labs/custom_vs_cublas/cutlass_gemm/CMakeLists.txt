@@ -48,6 +48,7 @@ target_compile_options(cutlass_blackwell_gemm PRIVATE
         --use_fast_math
         --expt-relaxed-constexpr
         -gencode=arch=compute_100a,code=sm_100a
+        -gencode=arch=compute_103a,code=sm_103a
         -D_GLIBCXX_USE_CXX11_ABI=0
     >
     $<$<COMPILE_LANGUAGE:CXX>:

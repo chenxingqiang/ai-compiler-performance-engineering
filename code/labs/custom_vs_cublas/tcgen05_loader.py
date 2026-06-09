@@ -47,7 +47,11 @@ def _get_cuda_flags() -> list[str]:
         raise RuntimeError("CUTLASS include directory not found.")
     
     major, minor = torch.cuda.get_device_capability()
-    if major >= 10:
+    if major == 10 and minor >= 3:
+        # Blackwell Ultra (GB300, sm_103). sm_100a cubins are arch-locked and give
+        # "no kernel image is available" on sm_103, so target sm_103a explicitly.
+        flags.append("-gencode=arch=compute_103a,code=sm_103a")
+    elif major >= 10:
         flags.append("-gencode=arch=compute_100a,code=sm_100a")
     else:
         raise RuntimeError(f"tcgen05 requires SM 10.0+ (Blackwell). Got SM {major}.{minor}")
