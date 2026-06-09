@@ -33,7 +33,8 @@ BLOCK_SCALING_SOURCE_URL = (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CUTLASS_EXAMPLE_PATH = (
+# sm_100 (B200) example shipped by the pinned cutlass submodule (v4.1.0).
+SM100_EXAMPLE_PATH = (
     REPO_ROOT
     / "third_party"
     / "cutlass"
@@ -43,6 +44,19 @@ CUTLASS_EXAMPLE_PATH = (
     / "blackwell"
     / "dense_blockscaled_gemm_persistent.py"
 )
+# sm_103 (GB300 / Blackwell Ultra) example vendored from cutlass main (BSD-3).
+# The pinned v4.1.0 submodule predates sm_103 and its DSL-4.1 example uses APIs
+# removed in cutlass-dsl 4.5.x, so the GB300 path needs the sm103-specific
+# example. Imports resolve from the pip nvidia-cutlass-dsl[cu13]>=4.5.2 package
+# (no sibling-file deps); see vendor/README.md for provenance.
+SM103_EXAMPLE_PATH = (
+    Path(__file__).resolve().parent
+    / "vendor"
+    / "sm103_dense_blockscaled_gemm_persistent.py"
+)
+# Back-compat default (the sm_100 path); load_cutlass_example_module() selects
+# the sm_103 example per-arch at load time via _resolve_cutlass_example_path().
+CUTLASS_EXAMPLE_PATH = SM100_EXAMPLE_PATH
 
 DEFAULT_MNKL = (8192, 8192, 1024, 1)
 DEFAULT_MMA_TILER_MN = (256, 128)
@@ -261,19 +275,55 @@ def resolve_cuda_device(*, require_blackwell: bool) -> torch.device:
 
 
 @lru_cache(maxsize=1)
+def _is_blackwell_ultra() -> bool:
+    """True on GB300 / Blackwell Ultra (sm_103, compute capability 10.3)."""
+    if not torch.cuda.is_available():
+        return False
+    props = torch.cuda.get_device_properties(0)
+    return props.major == 10 and props.minor == 3
+
+
+def _resolve_cutlass_example_path() -> Path:
+    """Pick the arch-matched blockscaled example: the vendored sm_103 example on
+    Blackwell Ultra, else the sm_100 submodule example."""
+    if _is_blackwell_ultra() and SM103_EXAMPLE_PATH.exists():
+        return SM103_EXAMPLE_PATH
+    return CUTLASS_EXAMPLE_PATH
+
+
 def load_cutlass_example_module() -> ModuleType:
     """Load the NVIDIA CUTLASS blockscaled example as a Python module."""
-    if not CUTLASS_EXAMPLE_PATH.exists():
-        raise FileNotFoundError(f"Missing CUTLASS example: {CUTLASS_EXAMPLE_PATH}")
+    example_path = _resolve_cutlass_example_path()
+    if not example_path.exists():
+        raise FileNotFoundError(f"Missing CUTLASS example: {example_path}")
     spec = importlib.util.spec_from_file_location(
         "aisp_dense_blockscaled_gemm_persistent",
-        CUTLASS_EXAMPLE_PATH,
+        example_path,
     )
     if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to create import spec for {CUTLASS_EXAMPLE_PATH}")
+        raise ImportError(f"Unable to create import spec for {example_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # The sm_103 example imports cutlass.torch locally inside run(); the lab's
+    # build_problem accesses it as module.cutlass_torch (the sm_100 example
+    # exposed it at module level), so expose it here when absent.
+    if not hasattr(module, "cutlass_torch"):
+        import cutlass.torch as _cutlass_torch
+
+        module.cutlass_torch = _cutlass_torch
     return module
+
+
+def _select_blockscaled_kernel(module: ModuleType) -> tuple[Any, bool]:
+    """Return (kernel_class, needs_use_tma_store).
+
+    The sm_103 (GB300) kernel's ``can_implement`` and ``__init__`` take an extra
+    trailing ``use_tma_store: bool`` that the sm_100 (B200) kernel does not.
+    """
+    sm103_cls = getattr(module, "Sm103BlockScaledPersistentDenseGemmKernel", None)
+    if sm103_cls is not None:
+        return sm103_cls, True
+    return module.Sm100BlockScaledPersistentDenseGemmKernel, False
 
 
 def _mark_compact_tensor(
@@ -453,26 +503,31 @@ def build_problem(
     resolve_cuda_device(require_blackwell=compile_hardware)
     module = load_cutlass_example_module()
 
-    if compile_hardware and not module.Sm100BlockScaledPersistentDenseGemmKernel.can_implement(
-        module.cutlass.Float4E2M1FN,
-        module.cutlass.Float8E8M0FNU,
-        config.sf_vec_size,
-        module.cutlass.BFloat16,
-        config.mma_tiler_mn,
-        config.cluster_shape_mn,
-        config.m,
-        config.n,
-        config.k,
-        config.l,
-        "k",
-        "k",
-        "n",
-    ):
-        raise TypeError(
-            "Unsupported block scaling configuration: "
-            f"mnkl={config.mnkl}, mma_tiler_mn={config.mma_tiler_mn}, "
-            f"cluster_shape_mn={config.cluster_shape_mn}"
-        )
+    kernel_cls, needs_tma_store = _select_blockscaled_kernel(module)
+    if compile_hardware:
+        can_impl_args = [
+            module.cutlass.Float4E2M1FN,
+            module.cutlass.Float8E8M0FNU,
+            config.sf_vec_size,
+            module.cutlass.BFloat16,
+            config.mma_tiler_mn,
+            config.cluster_shape_mn,
+            config.m,
+            config.n,
+            config.k,
+            config.l,
+            "k",
+            "k",
+            "n",
+        ]
+        if needs_tma_store:
+            can_impl_args.append(True)
+        if not kernel_cls.can_implement(*can_impl_args):
+            raise TypeError(
+                "Unsupported block scaling configuration: "
+                f"mnkl={config.mnkl}, mma_tiler_mn={config.mma_tiler_mn}, "
+                f"cluster_shape_mn={config.cluster_shape_mn}"
+            )
 
     a_ref = module.cutlass_torch.matrix(config.l, config.m, config.k, False, module.cutlass.Float32)
     b_ref = module.cutlass_torch.matrix(config.l, config.n, config.k, False, module.cutlass.Float32)
@@ -525,11 +580,10 @@ def build_problem(
     current_stream = module.cutlass_torch.default_stream()
     compiled_gemm = None
     if compile_hardware:
-        gemm = module.Sm100BlockScaledPersistentDenseGemmKernel(
-            config.sf_vec_size,
-            config.mma_tiler_mn,
-            config.cluster_shape_mn,
-        )
+        ctor_args = [config.sf_vec_size, config.mma_tiler_mn, config.cluster_shape_mn]
+        if needs_tma_store:
+            ctor_args.append(True)
+        gemm = kernel_cls(*ctor_args)
         max_active_clusters = module.cutlass.utils.HardwareInfo().get_max_active_clusters(
             config.cluster_shape_mn[0] * config.cluster_shape_mn[1]
         )

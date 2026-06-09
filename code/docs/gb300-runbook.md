@@ -113,11 +113,13 @@ stdout) or run the `*_sm103` binary directly. An early ad-hoc probe wrongly
 flagged NVFP4 GEMM as "4.4 s / broken"; the real number is microseconds (above).
 
 ## Open issues found on GB300 (tier1)
-- `labs/block_scaling:block_scaling`: CUTLASS DSL leading-dim stride assertion
-  (`Expected strides[leading_dim] == 1, but got 8388608`). The lab loads the
-  `dense_blockscaled_gemm_persistent.py` example from the cutlass submodule (HEAD)
-  but runs against pinned `nvidia-cutlass-dsl==4.3.0`; align the submodule to the
-  4.3.0 release (or the DSL to the submodule).
+- `labs/block_scaling:block_scaling`: RESOLVED (2026-06-09). Was a CUTLASS DSL
+  leading-dim stride assertion under pinned `nvidia-cutlass-dsl==4.3.0` (no sm_103
+  in the DSL `Arch` enum). Fixed by pinning `nvidia-cutlass-dsl[cu13]>=4.5.2`,
+  vendoring the sm_103 example, and making `block_scaling_common.py` arch-aware.
+  Validated on GB300: verify 0.0 abs error, 1.96x speedup (software BF16 dequant
+  0.0867 ms -> hardware NVFP4 blockscaled 0.0443 ms). See the toolchain-skew note
+  below for the full root cause + the 3-part fix.
 - `labs/real_world_models:llama_3_1_8b`: baseline passes (7.7 ms); the optimized
   variant aborts (SIGABRT). Root cause: `torch.compile` of the FlexAttention path
   hits a Triton/LLVM codegen failure on sm_103, `LLVM ERROR: Cannot select:
@@ -144,23 +146,34 @@ fundamental GB300 problems:
   the C++ CUTLASS path (the `nvfp4_*_sm103` binaries, nvcc `-arch=sm_103a`) DOES
   support sm_103a and works; only the Python DSL JIT lags.
 
-  COMPLETE FIX (validated path, 3 parts):
-  1. cutlass-dsl: `nvidia-cutlass-dsl[cu13]>=4.5.2`. Confirmed in source that
+  COMPLETE FIX (all 3 parts DONE + validated on GB300, 2026-06-09):
+  1. cutlass-dsl: `nvidia-cutlass-dsl[cu13]>=4.5.2` in requirements_latest.txt.
      4.5.2 adds `sm_103`/`sm_103a`/`sm_103f` to the `Arch` enum (4.3.0/4.4.2 lack
-     them). The `[cu13]` extra pulls the CUDA-13 backend. requirements_latest.txt
-     updated. (Installed 4.5.2[cu13] on the validation pod; the inventory loop
-     stayed healthy on it.)
-  2. The matched example: cutlass main ships an sm_103-specific
-     `examples/python/CuTeDSL/cute/blackwell/kernel/blockscaled_gemm/sm103_dense_blockscaled_gemm_persistent.py`.
-     The pinned v4.1.0 submodule example uses `cute.arch.ProxyKind` (removed in
-     4.5.x) and the `Sm100BlockScaledPersistentDenseGemmKernel` class, so it must
-     be replaced with the sm103 example (bump/vendor; re-validate the C++
-     tcgen05/nvfp4 header path, which currently works on v4.1.0-39).
-  3. `labs/block_scaling/block_scaling_common.py` `build_problem` must move from
-     the `Sm100BlockScaledPersistentDenseGemmKernel` API to the sm103 example's
-     `Sm103BlockScaledPersistentDenseGemmKernel` / `Sm103BlockScaledBasicChunk` /
-     `sm103_make_smem_layout_*` API (a real port to the 4.5.x CuTe-DSL API).
-  Part 1 is done; parts 2-3 are a lab port coupled to a submodule bump.
+     them); the `[cu13]` extra pulls the CUDA-13 backend.
+  2. Vendored (not a submodule bump) the sm_103-specific example to
+     `labs/block_scaling/vendor/sm103_dense_blockscaled_gemm_persistent.py`
+     (cutlass main, commit 1fc71b3, BSD-3, byte-identical; see vendor/README.md).
+     It imports only from the pip `cutlass` package (`cutlass.utils.blackwell_helpers`,
+     `cutlass.utils.blockscaled_layout`), so it runs standalone with no sibling-file
+     deps and the v4.1.0 C++ tcgen05/nvfp4 header path is left untouched (still works).
+  3. `block_scaling_common.py` is now arch-aware: `_resolve_cutlass_example_path()`
+     picks the vendored sm_103 example on Blackwell Ultra (CC 10.3) else the sm_100
+     submodule example; `_select_blockscaled_kernel()` returns the `Sm103...` class
+     and passes the extra trailing `use_tma_store=True` that sm_103 `can_implement`
+     and `__init__` require (sm_100 does not); and load injects `module.cutlass_torch`
+     (the sm_103 example imports `cutlass.torch` locally inside `run()`). The SF
+     setup is unchanged: the sm_103 example uses the identical
+     `cvt_sf_MKL_to_M32x4xrm_K4xrk_L` + atom_m=(32,4)/atom_k=4 layout as sm_100.
+
+  VALIDATED on the GB300 pod (sm_103, cutlass-dsl 4.5.2[cu13]): the lab's own
+  harness path `build_problem(compile_hardware=True)` -> `verify_close()` ->
+  `run_hardware()` succeeds; verify_close = 0.0 max/mean abs error vs the software
+  reference (and the example's internal ref check passes at tol 0.1); measured
+  baseline (software BF16 dequant) 0.0867 ms vs optimized (hardware NVFP4
+  blockscaled) 0.0443 ms = 1.96x speedup (8192x8192x1024, sf_vec=16, mma (256,128),
+  cluster (2,1)). The strict-validity harness expectation write happens when the
+  inventory loop reaches the lab (the foreign-process guard only blocked an ad-hoc
+  concurrent run, not the fix).
 - `llama` optimized: Triton 3.7 (NGC) vs pinned 3.5.0 (above).
 The repo's actual GB300 kernels (tcgen05, NVFP4 GEMM, MoE, blackwell_matmul) are
 validated working; running on the repo-pinned toolchain (Triton 3.5.0 + a
