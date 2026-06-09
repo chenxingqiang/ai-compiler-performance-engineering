@@ -260,6 +260,37 @@ validated set.
 Net: the no_speedup classification is sound. No regression hides behind a tie. This closes
 the last in-scope GB300 lever.
 
+## Latent max-autotune crash hunt + coverage closure (2026-06-09)
+
+Hunted the hypothesis that the 28 unguarded `torch.compile(mode="max-autotune")` sites harbor
+latent GB300 SIGABRT crashes (the tcgen05.wait.st signature that hit llama and proton).
+REFUTED with evidence. Five flex_attention + max-autotune sites run clean on GB300: ch18
+flexdecoding 1.63x, paged_attn_backend 14.36x, paged_attn_layout 3.05x,
+flexattention_sliding_window 8.16x, and labs/flashattention4 best_available_attention 1.02x
+plus flashattention4 (kernel) 1.00x. So the flex+max-autotune signature is NOT predictive of
+the crash. The 2-3 real crashes (llama's FlexAttention config, proton's matmul autotune) were
+config-specific and are already fixed/guarded. A blind guard sweep of the remaining 28 sites
+is therefore correctly AVOIDED: on GB300 the guard turns max-autotune into default, which
+would change (and risk regressing) the many sites where max-autotune already produces a good
+kernel. The 3 guarded sites plus the per-site fixes cover the actual crash configs; the rest
+are GB300-safe as written.
+
+Coverage closures found by the hunt (targets untested in the original sweep):
+1. labs/flashattention4: now validated on GB300. The FA-4 flash_backend is unavailable in this
+   image, so the lab falls back gracefully to the best-available SDPA backend (no crash):
+   best_available_attention 1.02x, flashattention4 (kernel) 1.00x. Attention is at parity on
+   GB300 because SDPA is already optimal, correctly classified no_speedup.
+2. ch16 flashinfer_block_sparse: 3.70x on GB300, enabled by the flashinfer-python install this
+   session. A real validated win, previously blocked by the missing dependency.
+3. ch16 piece_graphs is an informational example (not a perf pair). multi_node_blackwell (no
+   multi-node fabric on a single GB300 node) and gpudirect_storage (a concepts demo) are
+   genuine env/scope gaps. inference_optimizations_blackwell, inference_serving_multigpu, and
+   fp8_compiled_matmul are source modules, not standalone targets (the earlier "missing" flags
+   were name mismatches).
+
+Net: no latent max-autotune crash exists on GB300, and the coverage gaps are closed
+(flashattention4 and flashinfer_block_sparse now validated).
+
 Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
 (`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
 report their OWN internal kernel timing; a wall-clock probe of `benchmark_fn`
