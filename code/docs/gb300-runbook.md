@@ -432,11 +432,25 @@ must be set NON-NULL before `cublasLtMatmulAlgoGetHeuristic` (the block-scaled h
 them), otherwise it still returns 0 results even in TN; set them to batch 0 pre-heuristic, then
 update per batch.
 
-Under nsys (`--profile minimal`/`deep_dive`) the SAME target reports failed_profiler, but that is a
-generic nsys-on-GB300 artifact, NOT the port: the error is `baseline:nsys:failed,
-optimized:nsys:failed` (nsys returns non-zero but still writes a valid .nsys-rep), and it hits the
-UNCHANGED naive baseline equally. The benchmark itself is status=succeeded with the 467x speedup;
-only the profiler-capture wrapper is red. `--profile none` is the clean correctness+perf verdict.
+Under nsys (`--profile minimal`/`deep_dive`) the SAME target reports failed_profiler, but the
+benchmark itself is status=succeeded with the 467x speedup; only the profiler-capture wrapper is red,
+and it hits the UNCHANGED naive baseline equally (`baseline:nsys:failed, optimized:nsys:failed`), so
+it is NOT the port. Root cause (diagnosed 2026-06-09, corrects an earlier "generic nsys-on-GB300"
+guess): it is a HARNESS python-profile-wrapper issue, not a GB300/driver nsys gap. For a
+CudaBinaryBenchmark the harness always nsys-profiles a generated python wrapper
+(`render_nsys_python_profile_wrapper`) that calls `benchmark_fn` -> `_run_once`, which re-spawns the
+compiled binary as a CHILD subprocess. nsys runs with `--wait primary`, so it follows the python
+parent; the child binary is captured only partially (~6 of 88 kernels) and `_run_once` then raises,
+yielding the non-zero exit. Proof it is the wrapper, not nsys/GB300: running nsys DIRECTLY on the
+binary, even with the harness's exact flag set (`--trace cuda,nvtx,osrt --sample none --cpuctxsw none
+--cuda-memory-usage true --cuda-um-gpu-page-faults true --cuda-um-cpu-page-faults true --wait
+primary`), exits 0 and captures all 88 kernels into a valid report. So `--profile none` is the clean
+correctness+perf verdict, and a DIRECT `nsys profile -t cuda,nvtx,osrt -o out ./<binary>_sm103` is
+the working deep-dive path for any CUDA-binary lab on GB300. Banked next lever: teach the harness to
+nsys-profile a CudaBinaryBenchmark's binary directly (skip the python wrapper for the binary class),
+which would unblock harness profiler-mode for the whole CUDA-binary suite; it is a shared-infra change
+(the wrapper also carries clock-lock/NVTX/validity/env-hardening) so it is deferred, not attempted
+here, since direct nsys already provides the capability.
 
 Baseline note (corrected 2026-06-09): baseline_cublaslt_gemm_fp4_sm103 runs FINE standalone (Naive
 Tiled FP4 GEMM 13.63 ms, 10.09 TFLOPS, exit 0). The earlier "-11" was an ncu-profiling/harness
