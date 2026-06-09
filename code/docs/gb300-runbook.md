@@ -596,12 +596,14 @@ FIXED this session + re-validated strict (failed -> pass):
   baselines actually train), so the failed->pass expectation rewrite is deferred;
   the unblock itself is confirmed.
 
-BANKED (not a GB300-arch break; root-caused, fix designed, validation deferred):
-- `labs/fullstack_cluster:moe_hybrid_ep` + `moe_hybrid_ep_multigpu`: an
-  EP collective-symmetry bug (a per-rank early-return skips an all-to-all on
-  0-token ranks -> NCCL all-reduce timeout). Hardware-independent; the fix +
-  validation plan are in the moe_hybrid_ep section above (no unvalidated
-  distributed fix committed, per the rigor discipline).
+FIXED + validated (was a hang, not a GB300-arch break):
+- `labs/fullstack_cluster:moe_hybrid_ep` + `moe_hybrid_ep_multigpu`: a CUDA-event
+  `elapsed_time` race in `PhaseEvents.to_metrics()` (called before
+  `forward_loss`'s `cuda.synchronize()`), which raised on some ranks and desynced
+  the collective stream. Fixed by synchronizing the terminal event before
+  `elapsed_time`. Both targets now run clean strict (failed_error -> failed_no_speedup
+  1.00x, errors=0; the 1.00x is an expected GB300 EP-dispatch tie). See the resolved
+  moe_hybrid_ep section above; the earlier collective-symmetry hypothesis is superseded.
 
 ENV-GAP (NGC base image lacks the dep; the pinned env has it; not a repo bug):
 - `ch18:vllm_v1_integration`: needs the vllm serving stack. vllm pins torch/triton
@@ -617,9 +619,10 @@ PRE-EXISTING METHODOLOGY QUIRK (hardware-agnostic, not a GB300 regression):
   as-is (fixing it is a pair-redefinition, out of scope for GB300 validation).
 
 Net: every GB300-arch break is fixed (sm_103a kernels, tcgen05 toolchain class,
-deps), the MoE collective hang is root-caused + banked, and the only remaining reds
-are an env-gap (vllm) and a hardware-agnostic pair quirk. The repo's frontier
-optimizations run correct and fast on GB300 (Blackwell Ultra, sm_103).
+deps), the moe_hybrid_ep capstone hang is fixed (CUDA-event race) + validated on both
+targets, and the only remaining non-green targets are an env-gap (vllm) and a
+hardware-agnostic pre-existing pair quirk (ch13). Every actual GB300 break is now
+resolved; the repo's frontier optimizations run correct and fast on GB300 (sm_103).
 
 The durable GB300 calibration baseline the repo lacked now exists:
 **58 `expectations_4x_gb300.json` files, 310 example expectations** (schema v2,
