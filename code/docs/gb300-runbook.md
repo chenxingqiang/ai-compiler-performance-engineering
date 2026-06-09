@@ -104,6 +104,38 @@ Net: the repo's frontier optimizations (tcgen05/TMA GEMM, NVFP4 GEMM, MoE ladder
 deliver real speedups on GB300. The headline GB300 fix is the `sm_103a` unblock of
 the tcgen05/TMEM family (previously unloadable on Blackwell Ultra).
 
+## L4 ncu-grounded Speed-of-Light: ch09 NVFP4 GEMM (decode shapes, sm_103)
+
+ncu `--set`-style metrics (kernel-replay, isolated, deterministic over 8 launches)
+on `optimized_cutlass_gemm_fp4_sm103`, GB300 (148 SMs), shape M=128/N=7168/K=16384:
+
+- Kernel: `SM100_MMA_MXF4_SS<float_e2m1_t, ...>` (NVFP4 tensor-core blockscaled),
+  CTA tile 128x64x256, grid (1, 112, 1) = 112 CTAs, block 256.
+- `gpu__dram_throughput.avg.pct_of_peak` = 43-46% (mean ~45%).
+- `sm__throughput.avg.pct_of_peak` = 33-36% (mean ~35%).
+- Wall-clock (un-profiled) 13.1 us = ~2.29 PFLOPS = 15% of the NVFP4 FLOP roofline
+  (GB300 nvfp4_dense 15.0 PFLOPS), and ~59% of the HBM-bound minimum
+  (B = 58.7 MB / 8.0 TB/s = 7.7 us).
+
+VERDICT (L4): at the decode shape (M=128) this kernel is OCCUPANCY/LATENCY-bound,
+not compute- or memory-bound. M=128 == tile_M so there is only ONE row-tile;
+N=7168 / tile_N=64 = 112 col-tiles, so the grid is 112 CTAs and under-fills the
+148-SM GPU (1 CTA/SM, 36 SMs idle, no second wave). Neither the tensor cores (SM
+35%) nor HBM (DRAM 45%) are saturated. This is the physics of small-M GEMM, not a
+kernel defect: the CUTLASS NVFP4 path itself is already the well-optimized
+(tensor-core, TMA, blockscaled) implementation.
+
+NEXT LEVER (Grind Mandate, DRAFT until measured): raise the CTA count above the SM
+count to fill the GPU and add a second wave. Two candidates, both per-shape and
+recompile-gated: (a) smaller tile_N (64 -> 32 doubles col-tiles to 224 > 148 SMs);
+(b) split-K across the large K=16384 reduction (more CTAs + an epilogue reduce).
+Production serving stacks pick these per shape via a tile heuristic; the book's
+ch09 example pins one tile to teach the path, so this is a characterization of the
+shape regime, not a defect to patch in the example. The C++ CUTLASS path supports
+sm_103a and runs the NVFP4 tensor cores correctly (the MMA atom above is the FP4
+tensor-core op), so the "utilize the latest hardware" box is checked; the residual
+gap is occupancy at decode-M.
+
 Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
 (`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
 report their OWN internal kernel timing; a wall-clock probe of `benchmark_fn`
