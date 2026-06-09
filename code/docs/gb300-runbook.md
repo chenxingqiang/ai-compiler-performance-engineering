@@ -293,7 +293,34 @@ relL2 ~1.4 / "numerically wrong"; that was a wrong-reference test error: the
 kernel computes `A[M,K] @ B[N,K]^T` with shape constraints `m%128==0, n%256==0,
 k%64==0`, so the reference must be `a @ b.T`, not `a @ b`. Superseded.)
 
-## moe_hybrid_ep distributed hang (collective-symmetry bug, root-caused; fix designed)
+## moe_hybrid_ep distributed hang -- RESOLVED (CUDA-event elapsed_time race)
+
+RESOLUTION (2026-06-09): FIXED with a one-line root-cause fix + validated on BOTH
+targets. The hang was NOT a collective-symmetry bug (that was a symptom + a wrong
+hypothesis, see the superseded analysis below). The actual cause: `PhaseEvents.to_metrics()`
+calls `cuda.Event.elapsed_time()`, and the BASELINE caller invokes it at `forward_loss`
+line ~640 BEFORE the `torch.cuda.synchronize()` at line ~647. On a rank whose terminal
+CUDA event has not completed yet (timing-dependent), `elapsed_time` raises
+`RuntimeError: Both events must be completed before calculating elapsed time`. That rank
+bails through the `finally: shutdown_topology` barrier while the ranks whose events DID
+complete proceed to the next collective (`route_counts_global` all_reduce) -- so the
+ranks deadlock on DIFFERENT collectives (the desync). Because it is a timing race, only
+SOME ranks raise each run, which is exactly the data-dependent asymmetry observed.
+
+FIX: `PhaseEvents.to_metrics()` now calls `self.end.synchronize()` (the terminal event,
+recorded last on the stream) before any `elapsed_time`, guaranteeing all four events are
+complete. Captured via a per-rank exception print (the `finally` barrier had swallowed
+the traceback). VALIDATED strict on GB300: both `moe_hybrid_ep` and `moe_hybrid_ep_multigpu`
+go from `failed_error` (NCCL desync hang) to `failed_no_speedup` (1.00x, errors=0) -- they
+now run cleanly to completion. The 1.00x is an expected GB300 EP-dispatch tie (memory-
+movement, same signature as the other GB300 near-ties), not a break. The diagnostic path
+that found it: py-spy stacks -> per-rank collective tracer -> NCCL watchdog (size-mismatch
+at SeqNum=59) -> per-call-site tracer (rank0 barrier@139 vs rank1 all_reduce@674) ->
+per-rank exception print (the `to_metrics` elapsed_time RuntimeError). The collective-
+symmetry hypotheses below are SUPERSEDED (they were real latent-bug candidates but not the
+cause; the fixes for them were reverted as unvalidated).
+
+--- SUPERSEDED INVESTIGATION (kept for the record) ---
 
 Found 2026-06-09 in the labs phase: `labs/fullstack_cluster:moe_hybrid_ep` and
 `:moe_hybrid_ep_multigpu` both fail "torchrun exited with code 1". The real error

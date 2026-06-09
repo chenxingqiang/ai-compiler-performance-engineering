@@ -74,6 +74,15 @@ class PhaseEvents:
     end: torch.cuda.Event
 
     def to_metrics(self) -> Tuple[float, float, float]:
+        # elapsed_time() requires BOTH events complete. The baseline caller invokes
+        # this before forward_loss's torch.cuda.synchronize(), so on a rank whose
+        # terminal event has not finished yet it raises "Both events must be
+        # completed before calculating elapsed time" -- timing-dependent, so only
+        # SOME ranks raise, bail to the shutdown `finally` barrier, and desync from
+        # the ranks that proceed to the next collective (the moe_hybrid_ep hang).
+        # Synchronizing the terminal event (recorded last on the stream) guarantees
+        # all four events are complete before any elapsed_time call.
+        self.end.synchronize()
         return (
             float(self.start.elapsed_time(self.mid)),
             float(self.mid.elapsed_time(self.mid2)),
