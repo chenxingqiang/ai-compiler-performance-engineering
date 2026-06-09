@@ -338,11 +338,16 @@ cause is upstream in the torchrun worker (not surfaced in the harness summary). 
 chased further given the 12 wins captured. reinit_comm skips cleanly ("requires
 torchrun/distributed launch context").
 
-Env-gaps (documented, not failures): the nvshmem half of ch04 (10 targets: nvshmem_ibgda,
-nvshmem_pipeline_parallel, nvshmem_vs_nccl, nvshmem_training and their multigpu variants) is
-dep-gated (nvshmem is not installed in this image), and the IBGDA and multi-node variants
-additionally need the absent multi-node fabric. The `_multigpu` suffixed duplicates of the base
-targets are not separately re-run (the base names already torchrun-dispatch to 4 GPUs).
+nvshmem half of ch04 (verified 2026-06-09, correcting an earlier "nvshmem not installed" note):
+torch 2.12 actually BUNDLES nvshmem (`torch.distributed._symmetric_memory.is_nvshmem_available()`
+returns True), so these targets are NOT dependency-gated. But running the 5 base targets shows a
+runtime/fabric infra-wall, not a win cluster: 4 (nvshmem_vs_nccl_benchmark,
+nvshmem_pipeline_parallel, nvshmem_training_example, nvshmem_training_patterns) fail_error because
+the nvshmem runtime init/bootstrap does not complete in the plain single-node torchrun context (no
+nvshmem launcher/fabric), and nvshmem_ibgda_microbench skips cleanly (IBGDA needs an InfiniBand
+fabric this single node lacks). So the nvshmem half contributes no wins: it is a runtime/fabric
+infra-wall, not a missing-dependency gap. The `_multigpu` suffixed duplicates are not separately
+run (the base names already torchrun-dispatch to 4 GPUs).
 
 Net: ch04 is no longer a coverage blind spot. It contributed 12 validated GB300 wins (up to
 40.44x), 5 ties, 3 banked torchrun edge cases, 1 clean skip, and the nvshmem env-gap, plus the
