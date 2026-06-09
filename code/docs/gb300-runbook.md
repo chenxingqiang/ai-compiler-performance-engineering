@@ -500,6 +500,17 @@ unlike FP4 where #3/#4 beat #0). The FP8 batched gain (1.11x) is smaller than FP
 because FP8 is more memory-bound (2x the operand bytes of FP4) so it underfills less severely at this
 shape (not ncu-confirmed). So both ch09 cuBLASLt GEMM labs now fill the GPU + auto-tune the algo.
 
+Auto-tune finding across the cuBLASLt GEMM family (2026-06-09): the heuristic auto-tune (top-8, pick
+fastest) only beats rank-0 on the NEWER block-scaled path. FP4 won (candidate #3/#4 > #0, +7.1%); FP8
+and FP16 (mature paths) both confirm rank-0 is already fastest (no algo win). FP16 did surface a
+separate methodology bug: optimized_cublaslt_gemm_fp16 lacked the warmup that baseline_cublaslt_gemm_fp16
+has, so the optimized was timed COLD against the warm baseline (under-reporting it, 0.0126 ms). The
+auto-tune supplies the missing warmup, so it is now matched warm-vs-warm: 0.0097 ms, accurate harness
+speedup 152.58x, verification green. So the auto-tune lever is FP4-specific; on mature dtypes its value
+is confirming rank-0 (and, for FP16, restoring matched-warm methodology). The generic gemm + ch19
+fp4_hardware remain (generic is mature -> expect rank-0; ch19 is FP4 single-matrix -> auto-tune may
+help).
+
 ## GB300 validated wins summary (consolidated, 2026-06-09)
 
 The wins surfaced from previously-untested coverage on the 4-GPU GB300 node, all
