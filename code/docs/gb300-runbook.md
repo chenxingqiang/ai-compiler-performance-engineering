@@ -116,8 +116,26 @@ flagged NVFP4 GEMM as "4.4 s / broken"; the real number is microseconds (above).
   but runs against pinned `nvidia-cutlass-dsl==4.3.0`; align the submodule to the
   4.3.0 release (or the DSL to the submodule).
 - `labs/real_world_models:llama_3_1_8b`: baseline passes (7.7 ms); the optimized
-  variant aborts (SIGABRT / exit -6) during optimized timing. Needs a direct run
-  of `optimized_llama_3_1_8b.py` to capture the C++ abort.
+  variant aborts (SIGABRT). Root cause: `torch.compile` of the FlexAttention path
+  hits a Triton/LLVM codegen failure on sm_103, `LLVM ERROR: Cannot select:
+  intrinsic %llvm.nvvm.tcgen05.wait.st`. This is a Triton 3.7 (NGC image) sm_103
+  bug; the repo pins Triton 3.5.0. Forcing GEMM autotune to ATEN and forcing the
+  Triton capability to (10,0) both still crash, so it is a FlexAttention-compile
+  codegen issue, not GEMM autotune. Likely resolved on the pinned Triton 3.5.0.
+
+## Toolchain-version-skew note (important)
+The two remaining broken frontier targets are NGC base-image version skews, NOT
+fundamental GB300 problems:
+- `block_scaling`: cutlass submodule is `v4.1.0-39` but `nvidia-cutlass-dsl` is
+  4.3.0 (pinned). DSL 4.3.0 `convert_cute_tensor` marks `dim_order()[-1]` as the
+  leading dim and asserts it is contiguous; the v4.1.0 blockscaled example's L=1
+  tensor layout violates this (NVIDIA's own example fails identically). Fix: bump
+  the cutlass submodule to v4.3.0 to match the pinned DSL, then re-validate the
+  tcgen05/nvfp4 C++ header build path (currently works on v4.1.0-39).
+- `llama` optimized: Triton 3.7 (NGC) vs pinned 3.5.0 (above).
+The repo's actual GB300 kernels (tcgen05, NVFP4 GEMM, MoE, blackwell_matmul) are
+validated working; running on the repo-pinned toolchain (Triton 3.5.0 + a
+DSL-matched cutlass submodule) is expected to clear both.
 - `labs/flashattention4:flashattention4_alibi`: optimized path measures 1.00x
   (no speedup over baseline) on the NGC torch 2.12 stack; the optimized backend
   is not beating the eager baseline here.
