@@ -375,6 +375,34 @@ infra-wall, the 2 gated skips above, and the 7 informational examples. Honest no
 second corrected over-claim of the session (the first was the nvshmem "not installed" note);
 re-examining on "proceed" surfaced 4 wins the premature close would have buried.
 
+## FP4 cuBLASLt unblock (2026-06-09): the skip is a wrong-transpose BUG, not a cuBLASLt gate
+
+ch09:cublaslt_gemm_fp4 skips with "SKIPPED: cuBLASLt NVFP4 algorithm unavailable on this
+driver/toolchain" (the optimized binary's `cublasLtMatmulAlgoGetHeuristic` returns status=15
+CUBLAS_STATUS_NOT_SUPPORTED, 0 results). That message is WRONG: cuBLASLt 13.4.1.1 DOES support
+NVFP4 GEMM on GB300. A standalone heuristic probe (`/tmp/fp4probe2.cu`, the read-the-source +
+reproducer verdict) isolates the cause:
+1. The lab's recipe (transa=N, transb=N, VEC16_UE4M3 block-scale, FP16 out): status=15 at all
+   sizes (256 and 4096), batched and non-batched. So it is not a size or batch issue.
+2. The TN recipe (transa=T, transb=N, VEC16_UE4M3, FP16 OR BF16 out): status=0, results=1.
+   cuBLASLt finds an NVFP4 algorithm.
+3. NT (transb=T) and an FP4 output type: status=15.
+
+So cuBLASLt NVFP4 on GB300 requires the TN format (transa=T, transb=N) with FP16/BF16 output,
+exactly like the cuBLASLt FP8 path. The lab uses N/N (a col-major reinterpretation that the FP8
+path tolerates but NVFP4 does not), which cuBLASLt rejects. This is a fixable wrong-transpose bug,
+not a driver/toolchain gate, and the lab's own skip message is misleading.
+
+Fix recipe (the next-lever, a correctness-sensitive re-layout of the teaching lab): set
+transa=CUBLAS_OP_T, keep transb=CUBLAS_OP_N, store/quantize both operands so the contraction dim K
+is the leading dim (K-major A and B, the standard cuBLASLt low-precision TN layout), FP16/BF16
+output, then verify numerics. GB300's NVFP4 GEMM capability is independently already demonstrated
+and SoL-grounded at ceiling via the CUTLASS labs/nvfp4_gemm path, so this cuBLASLt teaching variant
+is banked with the proven fix recipe rather than rewritten blind.
+
+Separately, baseline_cublaslt_gemm_fp4_sm103 segfaults (exit -11) on GB300, a naive-FP4-baseline
+memory bug to fix before the pair yields a clean A/B.
+
 Net: ch04 is no longer a coverage blind spot. It contributed 12 validated GB300 wins (up to
 40.44x), 5 ties, 3 banked torchrun edge cases, 1 clean skip, and the nvshmem env-gap, plus the
 refined comm pattern.
