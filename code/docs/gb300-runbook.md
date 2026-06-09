@@ -185,10 +185,13 @@ flagged NVFP4 GEMM as "4.4 s / broken"; the real number is microseconds (above).
   "default" on GB300 + Triton 3.7. CAVEAT: targets that call `torch.compile(...,
   mode="max-autotune")` DIRECTLY (several MoE-journey levels, blackwell_matmul_pipeline,
   moe_backend_selection, nanochat, train_distributed, flashattention4/flexattention)
-  bypass the helper and can still hit the abort on Triton 3.7 if they model-compile;
-  they are correct on the pinned Triton 3.5.0. The inventory loop (isolated_runner +
-  watchdog) surfaces any real direct-call crasher cleanly as a failed target; route
-  a crasher through `get_optimal_compile_mode`/`compile_model` to fix it on 3.7.
+  bypass the helper. Tested on GB300 + Triton 3.7: the MoE-journey direct max-autotune
+  path (`optimized_moe_pad_quant`) compiles + runs fine, so the abort is STRUCTURE-
+  specific to llama's attention compile, NOT all max-autotune model compiles, and the
+  direct callers are mostly safe. They are also correct on the pinned Triton 3.5.0.
+  The inventory loop (isolated_runner + watchdog) surfaces any real direct-call
+  crasher cleanly as a failed target; route such a crasher through
+  `get_optimal_compile_mode`/`compile_model` to fix it on 3.7.
 
 ## Toolchain-version-skew note (important)
 Both targets below were NGC base-image version skews, NOT fundamental GB300
