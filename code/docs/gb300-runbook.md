@@ -96,6 +96,9 @@ Confirmed working on GB300 (Blackwell Ultra) during breakthrough validation:
 - MoE optimization ladder (`moe_optimization_journey`, Python kernels):
   `optimized_moe_cuda_graphs` 0.935 ms vs 38.9 ms naive baseline (41.6x);
   `optimized_moe_triton` 17x.
+- `blackwell_gemm_optimizations` grouped GEMM (MoE-relevant): full_stack 0.124 ms
+  vs 0.312 ms baseline (2.5x).
+- `decode_optimization` ladder: `decode_ultimate` 1.29 ms vs 9.81 ms baseline (7.6x).
 
 Net: the repo's frontier optimizations (tcgen05/TMA GEMM, NVFP4 GEMM, MoE ladder)
 deliver real speedups on GB300. The headline GB300 fix is the `sm_103a` unblock of
