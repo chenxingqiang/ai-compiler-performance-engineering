@@ -403,6 +403,53 @@ is banked with the proven fix recipe rather than rewritten blind.
 Separately, baseline_cublaslt_gemm_fp4_sm103 segfaults (exit -11) on GB300, a naive-FP4-baseline
 memory bug to fix before the pair yields a clean A/B.
 
+## GB300 validated wins summary (consolidated, 2026-06-09)
+
+The wins surfaced from previously-untested coverage on the 4-GPU GB300 node, all
+verification-passed. Speedups are vs the lab's own naive/baseline arm (the book's lesson).
+
+| Win (chapter) | Speedup | Category | SoL note |
+| --- | --- | --- | --- |
+| nixl_tier_handoff (ch04) | 40.44x | comm, tiered transfer | 92.66 GB/s achieved vs 2.29 naive (measured) |
+| nccl (ch04) | 20.27x | comm, right-engine | NCCL vs naive; NVLink-bound |
+| cpu_reduction (ch04) | 18.20x | comm, right-engine | GPU vs CPU reduction |
+| grace_blackwell_locality (ch04) | 8.89x | comm, routing | Grace-Blackwell C2C locality |
+| gradient_compression_int8 (ch04) | 2.16x (5.75x comm-only) | comm, volume-reduction | int8 grads |
+| bandwidth_benchmark_suite (ch04) | 5.24x | comm | |
+| flashinfer_block_sparse (ch16) | 3.70x | kernel, dep-unlock | flashinfer install |
+| gradient_compression_fp16 (ch04) | 1.25x (3.38x comm-only) | comm, volume-reduction | fp16 grads |
+| continuous_batching (ch04) | 3.07x | serving | |
+| dataparallel (ch04) | 2.68x | comm | |
+| warp_specialized_two_pipelines_multistream (ch11) | 2.36x | kernel | earlier timeout fix |
+| matmul_tcgen05_pipelined (ch10) | 2.32x | kernel, tcgen05 | below cuBLAS tensor-core SoL (P2 teaching) |
+| tcgen05_cluster_pipeline (ch10) | 1.58x | kernel, tcgen05 | below cuBLAS tensor-core SoL (P2 teaching) |
+| nvlink_topology_aware (ch04) | 1.48x | comm, routing | |
+| eos_sync_polling (ch18) | 1.26x | serving | |
+
+Original-validation wins (earlier in the effort, for reference): block_scaling 1.96x (CuTe-DSL
+sm103 port), llama_3_1_8b 2.54x (compile-mode guard), the decode ladder (decode main-kernel 9.02x,
+warp-spec 5.43x), MoE journey torch.compile 43.38x, blackwell_matmul tcgen05 126x vs naive. The
+NVFP4 GEMM (labs/nvfp4_gemm) is the one clean kernel-SoL target and is at its H4/P4 vendor ceiling.
+
+SoL framing (B): the one comm win with a reported bandwidth is nixl at 92.66 GB/s (a tiered C2C/PCIe
+transfer path, 40x over the 2.29 GB/s naive staging). The tcgen05 kernel wins sit below the cuBLAS
+tensor-core SoL, consistent with the established ch10 P2-vs-P4 teaching framing. The other comm wins
+are time-based (no reported bandwidth), so a per-win measured NVLink %SoL needs in-pod dcgmi
+NVLINK-byte correlation over each short torchrun window; that is a heavy follow-up disproportionate
+to teaching labs whose speedup-over-naive is the intended lesson, banked as the next-lever.
+
+Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
+(volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
+optimize the kernel structure not the byte movement (kernel-structure + CUDA-graph opts carry the
+headroom; memory-movement opts near-tie on GB300's abundant bandwidth). (3) FP4, cuBLASLt NVFP4
+needs the TN format (the cublaslt_gemm_fp4 fix above).
+
+Not wins (documented env-gaps / infra-walls / gated-skips, not defects): vllm targets (vllm breaks
+the NGC toolchain), ch04 nvshmem half (runtime/fabric infra-wall: torch bundles nvshmem but the
+single-node torchrun context has no nvshmem launcher/fabric), cublaslt_gemm_fp4 (the wrong-transpose
+bug above, fix recipe known), tcgen05_warpgroup_specialization (kernel skip gate), the informational
+examples (not perf pairs), and the train_distributed remainder (marginal/slow, banked).
+
 Net: ch04 is no longer a coverage blind spot. It contributed 12 validated GB300 wins (up to
 40.44x), 5 ties, 3 banked torchrun edge cases, 1 clean skip, and the nvshmem env-gap, plus the
 refined comm pattern.
