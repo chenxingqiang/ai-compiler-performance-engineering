@@ -13,6 +13,21 @@ from core.harness.benchmark_harness import BaseBenchmark, BenchmarkConfig
 from labs.occupancy_tuning import triton_matmul
 
 
+def _tcgen05_codegen_broken() -> bool:
+    """True on Blackwell Ultra (sm_103, CC 10.3) with Triton >= 3.6, where the
+    Triton JIT emits a tcgen05.wait.st intrinsic the LLVM backend cannot select
+    (LLVM ERROR: Cannot select ...), an uncatchable SIGABRT. The repo-pinned
+    Triton 3.5.0 JITs the same kernel cleanly."""
+    try:
+        if torch.cuda.get_device_capability() != (10, 3):
+            return False
+        import triton
+
+        return tuple(int(x) for x in triton.__version__.split(".")[:2]) >= (3, 6)
+    except Exception:
+        return False
+
+
 @dataclass(frozen=True)
 class MatmulSchedule:
     name: str
@@ -143,6 +158,12 @@ class TritonMatmulProtonBenchmark(VerificationPayloadMixin, BaseBenchmark):
             raise RuntimeError("SKIPPED: Triton Proton lab requires a CUDA device.")
         if torch.cuda.device_count() < 1:
             raise RuntimeError("SKIPPED: CUDA device unavailable for Triton Proton lab.")
+        if _tcgen05_codegen_broken():
+            raise RuntimeError(
+                "SKIPPED: Triton >=3.6 on sm_103 (Blackwell Ultra) emits an "
+                "unloadable tcgen05 kernel (LLVM ERROR: Cannot select); use the "
+                "repo-pinned Triton 3.5.0."
+            )
 
         device = torch.device("cuda")
         _ensure_inductor_env()

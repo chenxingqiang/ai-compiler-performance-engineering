@@ -19,6 +19,7 @@ from core.harness.benchmark_harness import (
     BenchmarkConfig,
     WorkloadMetadata,
 )
+from core.utils.compile_utils import get_optimal_compile_mode
 from labs.moe_optimization_journey.moe_model import (
     ConfigurableMoEModel,
     MoEOptimizations,
@@ -152,10 +153,14 @@ class MoEJourneyBenchmark(VerificationPayloadMixin, BaseBenchmark):
         print(f"  Parameters: {self.parameter_count / 1e6:.1f}M")
         print(f"  Batch: {self.BATCH_SIZE} x {self.SEQ_LEN} = {self.BATCH_SIZE * self.SEQ_LEN} tokens")
         
-        # Apply torch.compile if enabled (Level 7)
+        # Apply torch.compile if enabled (Level 7). get_optimal_compile_mode keeps
+        # max-autotune on the pinned toolchain but falls back to "default" on
+        # sm_103 + Triton >= 3.6, where max-autotune emits an unloadable tcgen05
+        # kernel (LLVM ERROR: Cannot select intrinsic %llvm.nvvm.tcgen05.wait.st).
         if self.opts.use_compile:
-            print(f"\n  Compiling with mode='max-autotune'...")
-            self.compiled_model = torch.compile(self.model, mode="max-autotune")
+            _compile_mode = get_optimal_compile_mode("max-autotune")
+            print(f"\n  Compiling with mode='{_compile_mode}'...")
+            self.compiled_model = torch.compile(self.model, mode=_compile_mode)
         else:
             self.compiled_model = self.model
         

@@ -9,6 +9,7 @@ import torch
 from core.benchmark.verification_mixin import VerificationPayloadMixin
 from core.harness.benchmark_harness import BaseBenchmark, BenchmarkConfig, WorkloadMetadata
 from core.profiling.nvtx_helper import get_nvtx_enabled, nvtx_range
+from core.utils.compile_utils import get_optimal_compile_mode
 from labs.moe_optimization_journey.moe_pad_quant_common import build_moe_pad_quant_model
 
 
@@ -51,7 +52,12 @@ class OptimizedMoEPadQuantBenchmark(VerificationPayloadMixin, BaseBenchmark):
         )
         self.model = model.to(self.device, dtype=torch.bfloat16)
         self.model.eval()
-        self.compiled = torch.compile(self.model, mode="max-autotune")
+        # get_optimal_compile_mode keeps max-autotune on the pinned toolchain but
+        # falls back to "default" on sm_103 + Triton >= 3.6 (where max-autotune
+        # emits an unloadable tcgen05.wait.st kernel).
+        self.compiled = torch.compile(
+            self.model, mode=get_optimal_compile_mode("max-autotune")
+        )
         self.inputs = torch.randint(
             0, self.vocab_size, (self.batch, self.seq_len), device=self.device
         )

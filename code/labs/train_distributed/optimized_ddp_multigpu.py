@@ -17,6 +17,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from pathlib import Path
 
 from core.benchmark.gpu_requirements import require_min_gpus
+from core.utils.compile_utils import get_optimal_compile_mode
 
 try:
     from arch_config import prefer_sdpa_backends  # type: ignore
@@ -108,7 +109,14 @@ def main():
     )
 
     if args.compile:
-        ddp_model = torch.compile(ddp_model, mode="max-autotune", fullgraph=True, dynamic=False)
+        # get_optimal_compile_mode keeps max-autotune on the pinned toolchain but
+        # falls back to "default" on sm_103 + Triton >= 3.6 (unloadable tcgen05).
+        ddp_model = torch.compile(
+            ddp_model,
+            mode=get_optimal_compile_mode("max-autotune"),
+            fullgraph=True,
+            dynamic=False,
+        )
 
     optimizer = _maybe_fused_adamw(ddp_model.parameters(), args.learning_rate)
 
