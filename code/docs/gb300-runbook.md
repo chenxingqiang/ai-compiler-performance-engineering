@@ -647,17 +647,28 @@ Two verified facts that correct the naive "just build the pinned env" recommenda
    fails at import with `ModuleNotFoundError: No module named 'torch._opaque_base'`
    (the module is genuinely absent from that wheel). So the validated GB300 toolchain
    is the NGC torch 2.12 image, NOT the pinned 2.9.1 -- the 2.9.1 pin is the
-   B200/baseline era. A clean GB300 from-scratch env should base on torch 2.12+
-   (CUDA 13, sm_100 + compute_120) and keep triton 3.5.0 (which JITs the sm_103
-   `tcgen05` kernels cleanly, unlike the NGC triton 3.7 -- see the max-autotune class).
+   B200/baseline era.
 
-## One-shot env build (resolves the whole toolchain/dep class at once)
+3. triton 3.5.0 does NOT fix sm_103 max-autotune either (REFUTES the earlier
+   "3.5.0 JITs sm_103 cleanly" assumption, for the only testable pairing). A venv
+   with NGC torch 2.12 + `triton==3.5.0` (confirmed loaded: "USING triton 3.5.0")
+   STILL aborts a `torch.compile(mode="max-autotune")` with the same
+   `LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.tcgen05.wait.st`. So BOTH triton
+   3.5.0 and 3.7 hit the sm_103 `tcgen05` codegen wall with torch 2.12 (the
+   matched pinned pair torch 2.9.1 + 3.5.0 is untestable per fact 2, so 3.5.0's
+   inherent sm_103 behavior is unproven). NET: there is no proven clean
+   max-autotune-on-sm_103 toolchain today; the graceful `max-autotune -> default`
+   fallback (the `get_optimal_compile_mode` guard) is the necessary mitigation, not
+   a triton-3.7-only workaround.
 
-Every remaining non-arch issue (the Triton-3.7 `tcgen05` max-autotune/raw-kernel
-class, the transformers/flashinfer/vllm dep gaps) is a consequence of the NGC base
-image's specific versions, not the repo source. The clean GB300 env = NGC-style
-torch 2.12+ (the working forward-compat base, per fact 1+2 above) + triton 3.5.0
-(clean sm_103 `tcgen05` JIT) + the rest of `requirements_latest.txt` deps
-(transformers, flashinfer, vllm, ...) so there are no dep-gap skips. On that env,
-only the GB300-arch source fixes in this doc (items 1-8) are required. Do NOT expect
-the pinned torch 2.9.1 to be the GB300 base (fact 2).
+## One-shot env build (the working GB300 path)
+
+The validated, working GB300 env is the NGC base (torch 2.12, triton 3.7) PLUS the
+source fixes in this doc: items 1-8 (sm_103a kernels), the `max-autotune -> default`
+guard (sm_103 + triton >= 3.6, which covers the NGC pod), the proton tcgen05
+skip-guard, and the additive dep installs (transformers, flashinfer). The
+`requirements_latest.txt` dep set (transformers, flashinfer, vllm, ...) closes the
+env-gap skips. Do NOT expect a "pinned-env build" (torch 2.9.1 + triton 3.5.0) to
+be a cleaner GB300 base: fact 2 (2.9.1 won't import) and fact 3 (3.5.0 still aborts
+max-autotune with 2.12) refute that. A clean native sm_103 max-autotune path awaits
+an upstream torch/triton that emits a selectable `tcgen05` lowering for sm_103.
