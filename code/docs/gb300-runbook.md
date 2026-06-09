@@ -280,6 +280,52 @@ relL2 ~1.4 / "numerically wrong"; that was a wrong-reference test error: the
 kernel computes `A[M,K] @ B[N,K]^T` with shape constraints `m%128==0, n%256==0,
 k%64==0`, so the reference must be `a @ b.T`, not `a @ b`. Superseded.)
 
+## moe_hybrid_ep distributed hang (collective-symmetry bug, root-caused; fix designed)
+
+Found 2026-06-09 in the labs phase: `labs/fullstack_cluster:moe_hybrid_ep` and
+`:moe_hybrid_ep_multigpu` both fail "torchrun exited with code 1". The real error
+(in the torchrun subprocess stderr) is a NCCL ALLREDUCE/all-to-all timeout after
+600s: ranks stuck at DIFFERENT collectives (some at `forward_loss` line 674, some at
+`shutdown_topology` barrier line 139), the signature of a collective-symmetry break.
+
+ROOT CAUSE (precise, in `labs/fullstack_cluster/moe_hybrid_ep_common.py`): the
+same-node expert dispatch is an all-to-all over `topology.local_group` (all node
+ranks), but it is gated per-rank in two places, so a rank that routes 0 tokens to
+other ranks skips the collective while its peers call it:
+1. Caller (line ~579): `if bool(same_node_mask.any()) and ... local_group is not None:`
+   - a rank with no same-node tokens never calls `_roundtrip_routes`.
+2. `_roundtrip_routes` (line ~400): `if tokens.numel() == 0: return tokens, None`
+   - even if called, an empty-token rank returns before `_exchange_counts`
+     (all_gather) + `_all_to_all_single`.
+On a single 4-GPU GB300 node `inter_node_world_size = world_size - local_world_size
+= 0`, so ALL routing is same-node; with the test's unbalanced routing at least one
+of the 4 ranks gets 0 same-node tokens per step and skips the all-to-all -> the
+other ranks block in the collective -> 600s NCCL watchdog timeout -> torchrun exits
+1. (The remote/inter-node path line ~534 `bool(remote_node_mask.any())` has the same
+pattern but is inert on a single node; it is the multi-node analog.) This is a
+general EP-correctness bug, not GB300-specific, but the single-node 4-GPU topology
+makes it fire every run.
+
+FIX (designed, validation pending): make the same-node dispatch collective-symmetric.
+(a) Caller: call `_roundtrip_routes` for ALL local_group ranks when
+`local_world_size > 1` (drop the per-rank `same_node_mask.any()` gate); the empty
+ranks pass empty token tensors. (b) `_roundtrip_routes`: early-return only when
+`group_size <= 1`; for `group_size > 1` proceed even with empty `tokens` so the rank
+still does the symmetric `_exchange_counts` (all_gather of counts) + the dispatch and
+return `_all_to_all_single` (send 0, receive peers' tokens, compute, return them).
+`bincount(empty, minlength=group_size)` -> all-zero send_counts and the all-to-all
+handles 0 input splits with non-zero output splits, so the empty rank participates
+correctly. Apply the analogous symmetric change to the remote path for multi-node.
+
+VALIDATION PLAN (deferred; high-cost + the loop holds GPUs intermittently): on the
+GB300 node, a 3-4 rank `torchrun` of the entrypoint with a lowered NCCL timeout
+(e.g. `init_process_group(timeout=30s)`) for fast repro: confirm the hang on current
+code, then confirm pass + correct numerics on the fix, then a strict harness re-run
+of both `moe_hybrid_ep` targets. Not committed as code until validated (no unvalidated
+distributed fix per the rigor discipline). The loop records both targets failed and
+continues (the hang did not wedge the inventory: the 600s NCCL timeout + harness
+contained it).
+
 ## Missing repo deps on the NGC base image (env gap, not a repo bug)
 
 Found 2026-06-09 (ch16 `flashinfer_block_sparse` failed `No module named 'flashinfer'`).
