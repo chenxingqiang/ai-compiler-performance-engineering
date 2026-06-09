@@ -348,6 +348,19 @@ Net: ch04 is no longer a coverage blind spot. It contributed 12 validated GB300 
 40.44x), 5 ties, 3 banked torchrun edge cases, 1 clean skip, and the nvshmem env-gap, plus the
 refined comm pattern.
 
+## train_distributed coverage (2026-06-09): remainder banked (low value, high cost)
+
+Extending the distributed hunt to labs/train_distributed: its 19 recorded entries
+(ddp_compression, zero1/zero3, pipeline_1f1b/gpipe/dualpipe) already cover the chapter's speed
+lessons, but 6 base targets lacked a result (ddp, ddp_flash, fsdp, fsdp2, zero2, symmem_training).
+Measured ddp at 1.06x (marginal, just over the 1.05x gate, the overlap-ties pattern). The other 5
+were banked per value-vs-cost: ddp_flash is single-GPU 100-step flash training whose default-mode
+compile (the sm_103 max-autotune fallback) ran ~47 min ETA for one target, and fsdp, fsdp2, zero2,
+symmem_training are memory-sharding and symmetric-memory methods that tie on raw step-time at
+single-node 4-GPU scale (their benefit is memory headroom at larger scale, not speed here). The
+distributed win cluster was ch04 (12 wins up to 40.44x); the train_distributed remainder is
+marginal and slow, so it is banked rather than chased.
+
 Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
 (`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
 report their OWN internal kernel timing; a wall-clock probe of `benchmark_fn`
