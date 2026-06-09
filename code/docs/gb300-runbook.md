@@ -152,17 +152,25 @@ flagged NVFP4 GEMM as "4.4 s / broken"; the real number is microseconds (above).
   Validated on GB300: verify 0.0 abs error, 1.96x speedup (software BF16 dequant
   0.0867 ms -> hardware NVFP4 blockscaled 0.0443 ms). See the toolchain-skew note
   below for the full root cause + the 3-part fix.
-- `labs/real_world_models:llama_3_1_8b`: baseline passes (7.7 ms); the optimized
-  variant aborts (SIGABRT). Root cause: `torch.compile` of the FlexAttention path
-  hits a Triton/LLVM codegen failure on sm_103, `LLVM ERROR: Cannot select:
-  intrinsic %llvm.nvvm.tcgen05.wait.st`. This is a Triton 3.7 (NGC image) sm_103
-  bug; the repo pins Triton 3.5.0. Forcing GEMM autotune to ATEN and forcing the
-  Triton capability to (10,0) both still crash, so it is a FlexAttention-compile
-  codegen issue, not GEMM autotune. Likely resolved on the pinned Triton 3.5.0.
+- `labs/real_world_models:llama_3_1_8b`: RESOLVED (2026-06-09). Was a SIGABRT in the
+  optimized variant. Matched A/B on ONE toolchain (Triton 3.7, sm_103, same GPU,
+  only the compile mode differs): `mode="max-autotune"` aborts with `LLVM ERROR:
+  Cannot select: intrinsic %llvm.nvvm.tcgen05.wait.st` (rc=134), `mode="default"`
+  runs clean. So the trigger is max-autotune's Triton 3.7 codegen emitting an
+  sm_103 `tcgen05.wait.st` its LLVM backend cannot lower (vanilla flex_attention
+  with max-autotune compiles fine, so it is the model-compile autotune path, not
+  FlexAttention itself). Fix: `_safe_compile_mode()` in
+  `labs/real_world_models/llama_3_1_8b_optimization.py` falls back max-autotune ->
+  default ONLY on sm_103 + Triton >= 3.6 (warns), preserving max-autotune on the
+  pinned Triton 3.5.0 and on every other arch. Validated on GB300: optimized now
+  runs (no abort) at 2.97 ms vs eager baseline 7.54 ms = 2.54x.
 
 ## Toolchain-version-skew note (important)
-The two remaining broken frontier targets are NGC base-image version skews, NOT
-fundamental GB300 problems:
+Both targets below were NGC base-image version skews, NOT fundamental GB300
+problems, and BOTH are now RESOLVED (2026-06-09): block_scaling via the cutlass-dsl
+4.5.2 + vendored sm_103 example + arch-aware lab port; llama via the
+`_safe_compile_mode()` max-autotune -> default fallback on sm_103 + Triton >= 3.6.
+Full root cause + fix for each:
 - `block_scaling`: the Python CuTe-DSL JIT path cannot target Blackwell Ultra on
   the pinned `nvidia-cutlass-dsl 4.3.0`. Root-caused four layers deep on GB300:
   (1) DSL `convert_cute_tensor` marks `dim_order()[-1]` as the leading dim, which
@@ -206,10 +214,14 @@ fundamental GB300 problems:
   cluster (2,1)). The strict-validity harness expectation write happens when the
   inventory loop reaches the lab (the foreign-process guard only blocked an ad-hoc
   concurrent run, not the fix).
-- `llama` optimized: Triton 3.7 (NGC) vs pinned 3.5.0 (above).
+- `llama` optimized (RESOLVED): the max-autotune Triton 3.7 sm_103 `tcgen05.wait.st`
+  abort, fixed by the `_safe_compile_mode()` fallback (max-autotune -> default on
+  sm_103 + Triton >= 3.6, preserving max-autotune on the pinned 3.5.0). Validated
+  optimized 2.97 ms vs eager 7.54 ms = 2.54x; matched A/B above.
 The repo's actual GB300 kernels (tcgen05, NVFP4 GEMM, MoE, blackwell_matmul) are
-validated working; running on the repo-pinned toolchain (Triton 3.5.0 + a
-DSL-matched cutlass submodule) is expected to clear both.
+validated working. Both former toolchain-skew breakages are now fixed in-repo, so
+the full suite is expected to be all-green on both the NGC image and the pinned
+toolchain.
 - `labs/flashattention4:flashattention4_alibi`: optimized path measures 1.00x
   (no speedup over baseline) on the NGC torch 2.12 stack; the optimized backend
   is not beating the eager baseline here.

@@ -21,6 +21,40 @@ from core.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _safe_compile_mode(preferred: str) -> str:
+    """Pick a torch.compile mode that the current toolchain can actually lower.
+
+    Triton >= 3.6 emits the ``tcgen05.wait.st`` PTX intrinsic under
+    ``max-autotune`` on Blackwell Ultra (sm_103 / CC 10.3), and its bundled LLVM
+    NVPTX backend cannot select it, so the compile hard-aborts
+    (``LLVM ERROR: Cannot select: intrinsic %llvm.nvvm.tcgen05.wait.st``). The
+    repo-pinned Triton 3.5.0 compiles ``max-autotune`` cleanly. On the affected
+    toolchain only, fall back to ``default`` (still graph-captured/fused, so it
+    still beats the eager baseline) and warn; every other arch/toolchain keeps
+    the preferred mode.
+    """
+    if preferred != "max-autotune" or not torch.cuda.is_available():
+        return preferred
+    if torch.cuda.get_device_capability() != (10, 3):
+        return preferred
+    try:
+        import triton
+
+        triton_mm = tuple(int(x) for x in triton.__version__.split(".")[:2])
+        triton_ver = triton.__version__
+    except Exception:
+        return preferred
+    if triton_mm >= (3, 6):
+        logger.warning(
+            "sm_103 + Triton %s: max-autotune emits an unloadable tcgen05 kernel; "
+            "falling back to compile mode 'default'. Use the pinned Triton 3.5.0 "
+            "for max-autotune.",
+            triton_ver,
+        )
+        return "default"
+    return preferred
+
+
 class Llama31_8B_Optimization:
     """Llama 3.1 8B optimization benchmark."""
     
@@ -173,7 +207,7 @@ class Llama31_8B_Optimization:
         if self.use_compile:
             self.model = compile_model(
                 self.model,
-                mode="max-autotune",
+                mode=_safe_compile_mode("max-autotune"),
                 fullgraph=False,
                 dynamic=False,
             )
