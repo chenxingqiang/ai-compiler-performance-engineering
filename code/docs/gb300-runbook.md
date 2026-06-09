@@ -218,6 +218,48 @@ codegen, removing the fallback) and production-scale model kernels (this repo te
 paths; the production paths are already the at-ceiling vendor libraries). Net: the GB300
 validation + optimization effort is comprehensively complete.
 
+## no_speedup tie audit (2026-06-09): correctly classified, no hidden regression
+
+Audited all 20 GB300 ties (best_optimization_speedup below the 1.05x gate, goal=speed, from
+the live this-session expectations). Verdict: every tie is correctly classified. The
+optimization genuinely does not win on GB300 at the lab's shape, and none is a mislabeled
+critical regression. Two groups.
+
+Near-ties (~0.95 to 1.03x) are memory-movement, host, or serving-orchestration opts whose
+bottleneck GB300 does not have: ch02 grace_coherent_memory 1.012, memory_transfer 1.026;
+ch03 double_buffered_batch_provisioning 0.956, pageable_copy 1.009, rack_prep 0.98; ch06
+launch_bounds 1.002; ch11 tensor_cores_streams 0.991; ch13 context/expert_parallel ~0.95;
+ch15 / ch17 disagg-serving ~0.95 to 1.02. Same GB300 pattern as the SoL sections: abundant
+bandwidth plus a fast host means memory and host opts tie.
+
+Sub-0.8 "optimized slower" cases are each a legitimate overhead or tradeoff teaching result
+(verified numerically correct), confirmed live where extreme:
+1. ch13 quantization 0.17x, confirmed live: baseline 0.671 ms vs optimized 3.91 ms. The
+   int8 `_int_mm` kernel itself is fast (5.4 us by ncu), but the per-call activation
+   quantize/dequantize overhead dominates, netting 5.8x slower than the fast baseline
+   (verification passed). The book's quant-overhead lesson, sharpened on GB300's fast
+   baseline. ch13 torchao_quantization 0.792 is the same class.
+2. ch10 tcgen05_warp_specialization 0.703 and warp_specialized_cluster_pipeline_cuda 0.714:
+   the hand-written warp-specialized tcgen05 kernel vs a simpler 2-stage TMA pipeline
+   baseline. Warp specialization's benefit is shape, arch, and implementation dependent,
+   and the teaching kernel loses at this shape on sm_103 (same family as the
+   educational-tcgen05-vs-cuBLAS P2-vs-P4 gap above).
+3. ch14 regional_triton 0.653: regional MLP compile vs a full-graph compile baseline (both
+   max-autotune). On GB300 the full-graph compile is fast enough that regional
+   compilation's churn-reduction does not pay back as raw speed.
+
+Robustness note surfaced by the audit: 31 raw `torch.compile(mode="max-autotune")` call
+sites exist repo-wide, only 3 routed through `get_optimal_compile_mode` (the sm_103 +
+Triton>=3.6 default-fallback guard). The sites that CRASH on GB300 (FlexAttention / proton
+tcgen05.wait.st codegen) were fixed individually; the rest produce loadable kernels (the
+quant no_speedup regressions are quant-overhead-bound, not compile-mode-bound). Routing the
+guard repo-wide is a safe GB300 robustness improvement (a no-op on the B200 / Triton-3.5
+pin), available if a future GB300 target trips the crash path, not a current defect for the
+validated set.
+
+Net: the no_speedup classification is sound. No regression hides behind a tie. This closes
+the last in-scope GB300 lever.
+
 Measurement caveat learned the hard way: the `CudaBinaryBenchmark` targets
 (`nvfp4_gemm`, `nvfp4_group_gemm`, `nvfp4_dual_gemm`, `top_k_kernel_cuda`, etc.)
 report their OWN internal kernel timing; a wall-clock probe of `benchmark_fn`
