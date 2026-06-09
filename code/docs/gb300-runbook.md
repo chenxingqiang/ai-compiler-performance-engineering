@@ -421,8 +421,16 @@ both scale tensors; transa=T; FP16 out; handle the batch SF stride), banked with
 since GB300's NVFP4 GEMM is independently already at the H4/P4 vendor ceiling via CUTLASS
 labs/nvfp4_gemm.
 
-Separately, baseline_cublaslt_gemm_fp4_sm103 segfaults (exit -11) on GB300, a naive-FP4-baseline
-memory bug to fix before the pair yields a clean A/B.
+Baseline note (corrected 2026-06-09): baseline_cublaslt_gemm_fp4_sm103 actually runs FINE
+standalone (Naive Tiled FP4 GEMM 13.63 ms, 10.09 TFLOPS, exit 0). The earlier "-11" was an
+ncu-profiling/harness artifact, not a baseline bug. So the remaining lab port is only the
+optimized side: apply the proven TN+swizzle recipe (committed reference above). The mechanical
+remaining work is to match the optimized binary's A/B input generation to the baseline's so the
+harness checksum verification compares like-for-like, decide kBatchCount (1, or batched only if
+cuBLASLt batched block-scaling is confirmed), and preserve the binary's stdout format
+("cuBLASLt NVFP4 GEMM (tensor cores): <ms> ms" / "Throughput: <tflops> TFLOPS" / checksum). This
+is a mechanical rewrite with zero recipe risk; banked since GB300's NVFP4 GEMM is already at the
+vendor ceiling via CUTLASS labs/nvfp4_gemm and the recipe + a working reference are committed.
 
 ## GB300 validated wins summary (consolidated, 2026-06-09)
 
