@@ -27,6 +27,10 @@ are in "GB300 validated wins summary" + the SoL bullets (B1-B7) below. Headlines
   (32-cubed tile -> 128x128x64, 12.76x harness, B13); ch10 persistent_matmul_tma 1.128x (B200->GB300
   retune: wider N-tile + 8 warps, B14). Banked: ch12 fixed grids (work_queue atomic-bound,
   uneven_partition already 216x; block-scaling is a no-op, B15).
+- GB300 lab unblock: occupancy_tuning (proton_matmul) was SKIPPED on GB300 (a Triton 3.7 tcgen05.wait.st
+  LLVM-select abort); root-caused to two triggers in triton_matmul.py (a dead num_warps:constexpr param
+  AND an unconditional GB10/sm_121-only arch_config patch) and fixed both, so the lab now runs (1.212x
+  harness, 256x256x64 = 1.62x ceiling). Lesson: guard arch patches by compute capability (B19).
 - Banked with evidence (forward progress, not dead ends): TMA 2D double-buffer (built + measured -19%,
   occupancy-dominated); ch02 P2P 762 GB/s (~80-85% of the NVLink5 pairwise ceiling, vendor-optimal);
   generic cutlass GEMM (also Sm80 but FP32 underfill-capped at 1024^3).
@@ -822,6 +826,18 @@ SoL framing (B), measured 2026-06-09:
   make the lab SIGABRT instead of skip cleanly). Full unblock needs the repo-pinned Triton 3.5.0 or
   isolating + removing the second trigger (deeper follow-up; the 1.62x bare-kernel result is the
   demonstrated ceiling if unblocked).
+- Kernel (B19, occupancy unblock ACHIEVED, SUPERSEDES B18): isolated the second trigger B18 was missing.
+  `import arch_config` (a GB10 / sm_121-only Triton SM-arch monkeypatch, applied unconditionally at
+  triton_matmul.py module load) is the other trigger: on sm_103 it misroutes the arch and the Triton 3.7
+  JIT emits the unselectable tcgen05.wait.st. Fixing BOTH triggers in triton_matmul.py (remove the dead
+  num_warps:constexpr kernel param + guard `import arch_config` to compute capability (12,1)) makes
+  triton_matmul.run_one JIT cleanly on Triton 3.7 / sm_103, so triton_matmul_schedules.
+  _tcgen05_codegen_broken() -> False and the lab no longer skips. Verified end-to-end: harness
+  labs/occupancy_tuning:proton_matmul_bm128_bn256_bk64 now SUCCEEDS at 1.212x vs the 64x64x32 baseline
+  (verify-pass), where it previously SKIPPED entirely on GB300. The 256x256x64 tile is the demonstrated
+  champion (~1.62x / 551 TFLOPS at 8192x8192x256 in a direct probe). A previously-dead GB300 lab is now
+  live; the lesson generalizes: an unconditional arch-patch import meant for one Blackwell SKU
+  (GB10/sm_121) can silently break codegen on another (GB300/sm_103) -- guard arch patches by capability.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,

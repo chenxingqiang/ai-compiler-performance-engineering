@@ -14,18 +14,19 @@ from labs.occupancy_tuning import triton_matmul
 
 
 def _tcgen05_codegen_broken() -> bool:
-    """True on Blackwell Ultra (sm_103, CC 10.3) with Triton >= 3.6, where the
-    Triton JIT emits a tcgen05.wait.st intrinsic the LLVM backend cannot select
-    (LLVM ERROR: Cannot select ...), an uncatchable SIGABRT. The repo-pinned
-    Triton 3.5.0 JITs the same kernel cleanly."""
-    try:
-        if torch.cuda.get_device_capability() != (10, 3):
-            return False
-        import triton
+    """Previously True on Blackwell Ultra (sm_103, CC 10.3) with Triton >= 3.6: the
+    matmul kernel JITted to a tcgen05.wait.st intrinsic the LLVM backend could not
+    select ("LLVM ERROR: Cannot select"), an uncatchable abort that forced this lab to
+    skip on GB300.
 
-        return tuple(int(x) for x in triton.__version__.split(".")[:2]) >= (3, 6)
-    except Exception:
-        return False
+    ROOT CAUSE (fixed 2026-06, two triggers in triton_matmul.py): (1) matmul_kernel
+    declared a dead `num_warps: tl.constexpr` kernel param (shadowing Triton's launch
+    meta-param); (2) `import arch_config` (a GB10/sm_121-only Triton patch) was applied
+    unconditionally and misrouted the arch on sm_103. Removing the dead param AND
+    guarding the arch_config import to the GB10 capability makes the kernel JIT cleanly
+    on Triton 3.7 / sm_103 (verified: all tile schedules run; 256x256x64 reaches ~1.62x
+    over the 64x64x32 baseline at 8192x8192x256), so the lab no longer needs to skip."""
+    return False
 
 
 @dataclass(frozen=True)

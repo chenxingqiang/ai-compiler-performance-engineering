@@ -9,9 +9,13 @@ import triton
 import triton.language as tl
 from core.utils.compile_utils import enable_tf32
 
-# Importing arch_config applies Triton SM-architecture patches (sm_121a -> sm_120)
-# so kernels keep compiling on GB10 systems until CUDA adds official support.
-import arch_config  # noqa: F401
+# arch_config patches Triton's SM-architecture handling for GB10 (sm_121a -> sm_120) so
+# kernels keep compiling there. It is GB10-ONLY: on GB300 (sm_103, Blackwell Ultra) the
+# patch makes the Triton 3.7 JIT emit a tcgen05.wait.st intrinsic LLVM cannot select
+# (uncatchable "LLVM ERROR: Cannot select"), which previously forced this lab to skip on
+# GB300. Guard the import to the GB10 compute capability so sm_103 JITs cleanly.
+if torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 1):
+    import arch_config  # noqa: F401
 
 enable_tf32()
 
@@ -33,7 +37,9 @@ def matmul_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    num_warps: tl.constexpr,
+    # num_warps is Triton's launch meta-parameter (passed at the call site), NOT a kernel
+    # parameter. A dead `num_warps: tl.constexpr` here also triggered the tcgen05.wait.st
+    # LLVM-select bug on Triton 3.7 / sm_103; it is the launch kwarg in run_one instead.
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
