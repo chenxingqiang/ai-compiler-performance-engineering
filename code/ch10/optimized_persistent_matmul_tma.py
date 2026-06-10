@@ -107,14 +107,15 @@ def _ensure_triton_allocator():
 # ============================================================================
 
 BLOCK_M = 128
-BLOCK_N = 128
+BLOCK_N = 256
 BLOCK_K = 64
-# Local B200 screening on the canonical 4096^3 workload favored a narrower
-# persistent kernel: fewer warps and a smaller grouped traversal keep the TMA
-# path ahead of the baseline without changing the math or the tile shape.
-GROUP_M = 2
-NUM_WARPS = 4
-NUM_STAGES = 5
+# GB300 (sm_103) re-tune. The earlier B200-screened narrow config (BLOCK_N=128,
+# GROUP_M=2, 4 warps) left the Blackwell tensor cores under-fed at 4096^3. A config
+# sweep on GB300 favored a wider N-tile + more warps: a 5-trial A/B put this config
+# at 1390 +/- 4 TFLOPS vs the old 1232 +/- 2 (1.128x), exact match vs torch.mm.
+GROUP_M = 4
+NUM_WARPS = 8
+NUM_STAGES = 4
 
 @triton.jit
 def persistent_matmul_tma(
