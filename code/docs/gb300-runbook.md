@@ -692,7 +692,10 @@ SoL framing (B), measured 2026-06-09:
   1.2853684480e+09 == baseline), harness 1.72x (was ~1.24x). Sweep: 256x128x64 2481, 128x256x64 2492,
   256x256x64 3007, 256x256x128 3353, 128x256x128 3432 (best), 128x128x128 2756, 128x256x256 3332. Same
   lab family as B5/B8 but the lever is the K-tile depth, not the arch (already Sm100); the parity check
-  vs cuBLAS is what surfaced the headroom.
+  vs cuBLAS is what surfaced the headroom. The deeper-K lever is FP8-SPECIFIC (banked-negative for
+  FP16): applying 128x256x128 to the ch14 FP16 extension (B8) REGRESSED it 1596 -> 1545 TFLOPS because
+  FP16's 2-byte elements double the K-tile smem and halve the pipeline stages; FP16 is already at
+  cuBLAS-parity there (1596 vs cuBLAS-FP16 1587), so no headroom remained. ch14 kept at 256x128x64.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
