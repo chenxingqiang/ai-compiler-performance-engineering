@@ -712,6 +712,16 @@ SoL framing (B), measured 2026-06-09:
   1024^3. The standalone dense-GEMM + memory + reduction + arch-tag frontiers are all closed; remaining
   headroom is a different class (the Python/torch.compile MoE/decode/attention kernels already at
   7-41x, and end-to-end/fusion).
+- Kernel (B10, banked-negative), first Python/Triton frontier probe: the blackwell_gemm_optimizations
+  Triton grouped GEMM (FP16, 4 experts, M~2048 / K=2048 / N=3072) full_stack autotune explored only
+  BLOCK_K=64. Added BLOCK_K=128 deep-K configs (the FP8 winner) to the @triton.autotune set -- the
+  autotuner did NOT pick them (961 TFLOPS unchanged), confirming deep-K is FP8-specific (FP16's 2-byte
+  smem, same as the ch14 regression). The grouped GEMM sits at 25.6% FP16 SoL (961 vs cuBLAS-batched
+  torch.bmm 1491 = 1.55x), but that gap is the grouped/masked kernel's inherent overhead vs the vendor
+  batched path (the tile space is autotuned + now deep-K-checked); closing it needs a deep Triton
+  rewrite (mask elision / pipelining), not a tile knob. Reverted the unused configs. Lesson: the
+  standalone tile/arch/sync levers do NOT transfer to the Python/Triton frontier kernels -- they are a
+  genuinely different class needing framework-specific deep work.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
