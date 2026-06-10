@@ -158,7 +158,15 @@ def heading_level(size: float) -> int:
 
 
 def is_code(ln: Line) -> bool:
-    if ln.mono_frac >= 0.6:
+    # Real code listings are set in a monospaced font (UbuntuMono, 8.5pt in
+    # listings and 10pt for standalone constant-width terms), so the line's
+    # DOMINANT (largest) font is monospaced. A prose line that merely contains a
+    # long inline-code token (e.g. ``cudaFuncAttributePreferredSharedMemoryCarveout
+    # to select the memory ...``) keeps the serif body font (MinionPro ~10.5pt) as
+    # its dominant font, so it can have a high mono fraction while NOT being code.
+    # Gate on the dominant font, not on mono_frac alone, so body prose is never
+    # fenced as code and real constant-width code at 10pt is never dropped.
+    if "Mono" in ln.font and ln.mono_frac >= 0.6:
         return True
     return ln.size <= 9.2 and ln.x0 >= 84.0 and ln.mono_frac > 0.0
 
@@ -185,9 +193,25 @@ def join_prose(lines: list[str]) -> str:
             out = out[:-1] + ln.lstrip()
         elif out.endswith("-"):
             out = out + ln.lstrip()  # hard compound hyphen wrapped at line end
+        elif out.endswith("`") and ln.lstrip().startswith("`"):
+            # An inline-code identifier wrapped across a line break (e.g.
+            # "...pipeline: `pro`" + "`ducer_acquire()`..."). The two backtick
+            # spans are one identifier with no source space, so merge them by
+            # dropping the adjacent boundary backticks. Genuine space-separated
+            # inline pairs (e.g. `const` `__restrict__`) live WITHIN one source
+            # line and never reach this cross-line join.
+            out = out[:-1] + ln.lstrip()[1:]
         else:
             out = out + " " + ln.lstrip()
-    return re.sub(r" {2,}", " ", out).strip()
+    out = re.sub(r" {2,}", " ", out).strip()
+    # Normalize hyphenation that survived line-join: U+00AD is a zero-width soft
+    # hyphen (always drop); U+2010/U+2011 used MID-WORD are typographic compound
+    # hyphens (e.g. "remote\u2010NUMA", "round\u2010robin") -> normalize to ASCII
+    # "-". A trailing U+2010/U+2011 is a dangling cross-block break; leave it so it
+    # stays visible rather than silently corrupting the word.
+    out = out.replace("\u00ad", "")
+    out = re.sub(r"[\u2010\u2011](?=\S)", "-", out)
+    return out
 
 
 def guess_lang(code: str) -> str:
