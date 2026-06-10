@@ -674,8 +674,12 @@ SoL framing (B), measured 2026-06-09:
   0.337x), maxdiff 0.0 vs cuBLAS (identical result). The comparison is now fair (both on Blackwell
   tensor cores). Measured by direct timing (the harness classifies this comparison pair as
   informational/skipped). Same root cause as B5 (ch09 cutlass_gemm_fp16); the arch-tag scan found
-  both. The sibling labs/top_k_kernel/top_k_kernel_cuda.cu scoring GEMM carries the same Sm80 tag
-  (next lever).
+  both. The sibling labs/top_k_kernel/top_k_kernel_cuda.cu scoring GEMM has the same Sm80 tag but is
+  BANKED measured-negative: at its top-k shapes (M=32768, K=128, N=256-512) it is memory-bound (K=128
+  -> arithmetic intensity ~57 FLOP/byte, far below the ~469 FP16 ridge; 174 TFLOPS = 4.6% FP16 SoL)
+  and the Sm80 path already beats cuBLAS there (1.10-1.41x), so the tensor-core arch barely matters and
+  a Sm100 dense-tuned 256x128 tile would likely regress the tall-skinny K=128 GEMM. Arch-tag scan
+  complete: ch09 + ch14 ported (wins); top_k + generic cutlass_gemm banked.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
