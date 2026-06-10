@@ -699,8 +699,14 @@ SoL framing (B), measured 2026-06-09:
   parity probe across the dense FP16 GEMMs confirms they are at the vendor ceiling: ch09
   cutlass_gemm_fp16 (2048^3) 1171 TFLOPS BEATS cuBLAS-FP16 (1072, 1.09x); ch14 (4096^3) 1596 matches
   cuBLAS (1634, 0.98x). With FP8 now 1.12x OVER cuBLAS, the dense-GEMM tile-tune frontier is closed
-  (every dense GEMM is at or above the vendor library). The remaining CUTLASS FP4 lab is decode-shape
-  (M=128, memory-bound ~60% HBM SoL), a different regime where the compute-tile lever does not apply.
+  (every dense GEMM is at or above the vendor library). The CUTLASS FP4 labs (cutlass_gemm_fp4,
+  fp4_all_concepts, fp4_perchannel) are ALL decode-shape (M=128, e.g. 128x7168x16384; memory-bound
+  ~60% HBM SoL; all_concepts already variant/stage/swizzle-tuned), a different regime where the
+  compute-tile lever does not apply. CUTLASS GEMM family now fully classified: dense FP16/FP8
+  at-or-above cuBLAS (FP8 +12%), FP4 decode at the HBM ceiling, generic FP32 underfill-capped at
+  1024^3. The standalone dense-GEMM + memory + reduction + arch-tag frontiers are all closed; remaining
+  headroom is a different class (the Python/torch.compile MoE/decode/attention kernels already at
+  7-41x, and end-to-end/fusion).
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
