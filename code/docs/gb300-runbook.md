@@ -783,6 +783,18 @@ SoL framing (B), measured 2026-06-09:
   that changes the lesson). uneven_partition is ALREADY 216x vs baseline (device work-stealing,
   memory-bound) with no block-count headroom. Reverted the work_queue change; ch12 has no fixable
   grid-size lever.
+- Kernel (B16, banked / infra-blocked), Phase-B deep grouped-GEMM codegen probe: the residual balanced
+  gap (988 Triton vs ~1650 cuBLAS bmm = 1.67x) was already diagnosed (B12) as Triton tl.dot codegen on
+  Blackwell, not a tile knob (autotune frontier exhausted). To ground it with a zymtrace GPU flamegraph,
+  stood up a zymtrace-injected pod (NGC image + CUDA_INJECTION64_PATH + the /var/lib/zymtrace/profiler
+  hostPath) on s22l4nb4 running the grouped-GEMM in a loop: pod-side healthy (IMPLANT_PRESENT, frames
+  generating, a zymtrace-profiler on the node). BUT the zymtrace backend (freshly redeployed ~15 min
+  earlier by a concurrent session) has an uninitialized ClickHouse: the zymtrace_profiling database does
+  not exist (SHOW DATABASES shows only default/system), so the MCP topfunctions query fails ("Database
+  zymtrace_profiling does not exist") and no flamegraph can be served. Infra-wall, not a grouped-GEMM
+  finding. Banked: the gap stays diagnosed-as-codegen (B12); next lever = a hand-written tcgen05 /
+  TMA-descriptor Triton grouped kernel matching cuBLAS's 2-SM tensor-core path (large, uncertain,
+  likely-upstream-Triton). Injected pod torn down (experiment=aisp-ggemm-zymtrace-20260610).
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
