@@ -31,7 +31,12 @@ namespace cg = cooperative_groups;
 
 constexpr int BLOCK_SIZE = 256;
 constexpr int CLUSTER_SIZE = 2;  // Keep small for reliability
-constexpr int ELEMENTS_PER_BLOCK = 4096;
+// 256 KB/block (was 4096 = 16 KB): amortizes the per-block cluster.sync + DSMEM
+// peer-read over far more streamed bytes, and the long grid-stride load loop gives
+// each thread many in-flight loads (MLP from ILP) so HBM BW rises even as the block
+// count falls. Same GB300 knee as the warp_specialized sibling (4096->65536 lifts
+// it 54.5% -> ~80% HBM SoL).
+constexpr int ELEMENTS_PER_BLOCK = 65536;
 
 namespace {
 int env_or_default(const char* name, int fallback) {

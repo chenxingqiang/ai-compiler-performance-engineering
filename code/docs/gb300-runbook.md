@@ -549,6 +549,7 @@ verification-passed. Speedups are vs the lab's own naive/baseline arm (the book'
 | continuous_batching (ch04) | 3.07x | serving | |
 | dataparallel (ch04) | 2.68x | comm | |
 | warp_specialized_two_pipelines_multistream (ch11) | 2.36x | kernel | earlier timeout fix |
+| dsmem_reduction_warp_specialized (ch10) | 2.80x | kernel, HBM BW, sync-amortization | 6729 GB/s = 84% HBM SoL (ncu DRAM 65.9%->78.6%); ELEMENTS_PER_BLOCK 4096->65536 amortizes cluster.sync + DSMEM atomic, grid-stride MLP holds BW as blocks fall (5402->6729, 1.245x); was 2.24x harness, verify-passed. v3 sibling: 54.5%->69.8% (4363->5585, 1.28x, harness 2.33x) |
 | matmul_tcgen05_pipelined (ch10) | 2.32x | kernel, tcgen05 | 28.2% FP16 tensor-core SoL (measured: 1057 TFLOPS) |
 | tcgen05_cluster_pipeline (ch10) | 1.58x | kernel, tcgen05 | below cuBLAS tensor-core SoL (P2 teaching) |
 | nvlink_topology_aware (ch04) | 1.48x | comm, routing | |
@@ -608,9 +609,22 @@ SoL framing (B), measured 2026-06-09:
   31.2% FP16 SoL), harness 12.1x -> 32.16x vs the SIMT baseline, verification passed (checksum
   1.26223e7 matches baseline to 2e-6). It is the same lesson as B3/B4: an "optimized" GB300 lab can
   silently run a prior-arch path. Still underfill-limited (1.68 waves, 43% SM) at the fixed 2048^3 the
-  A/B requires; next lever (banked, low EV): fill, capped by that shape. The FP8 sibling is already on
-  the Sm100 path (2481 TFLOPS, 6.74 waves at 4096^3); the generic/fp4 CUTLASS labs are next in the
-  sweep.
+  A/B requires; next lever (banked, low EV): fill, capped by that shape. The FP8 + fp4 CUTLASS siblings
+  are already on the Sm100 path (FP8 2481 TFLOPS, 6.74 waves at 4096^3). The generic CUTLASS GEMM is
+  also arch::Sm80 but FP32/TF32 at a tiny 1024^3 (0.42 waves), so its Sm100 port is underfill-capped
+  (banked low-EV).
+- Kernel (B6), Phase-1 discovery-sweep, ch10 DSMEM cluster reductions (64M-float / 256 MB): the
+  `__launch_bounds__(,1)` occupancy hypothesis was REFUTED by ncu (warp_specialized at 91.45% achieved
+  occupancy, 26 regs, 13.5 waves; not occupancy-starved). The real limiter was sync-overhead
+  amortization: at ELEMENTS_PER_BLOCK=4096 (16 KB/block) each block read only 16 KB before its
+  block-reduce + cluster.sync + DSMEM step, so a read-only stream sat at 66% DRAM vs a copy's ~90%.
+  Streaming 256 KB/block (ELEMENTS_PER_BLOCK 4096->65536) amortizes the fixed sync cost, and the long
+  grid-stride load gives each thread many in-flight loads (MLP from ILP) so HBM BW rises even as the
+  block count falls (warp_specialized knee 5402->6389->6613->6726 GB/s at 4096/16384/32768/65536;
+  131072 underfills to 6529). Results: warp_specialized 5402 -> 6729 GB/s (1.245x, 67.5% -> 84% HBM
+  SoL, ncu DRAM 65.9% -> 78.6%, harness 2.24x -> 2.80x); v3 (CLUSTER_SIZE=2) 4363 -> 5585 GB/s (1.28x,
+  54.5% -> 69.8%, harness 2.33x). Both verify-passed (sum exact), DSMEM-cluster lesson intact. Same
+  class as B3 (a real fixable gap behind a refuted first hypothesis), found by the discovery sweep.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,

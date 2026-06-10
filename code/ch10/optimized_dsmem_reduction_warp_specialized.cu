@@ -40,7 +40,15 @@ namespace cg = cooperative_groups;
 
 constexpr int BLOCK_SIZE = 256;
 constexpr int CLUSTER_SIZE = 4;
-constexpr int ELEMENTS_PER_BLOCK = 4096;
+// Each block streams 65536 floats (256 KB) before the block-reduce + cluster.sync
+// + DSMEM atomic. At the original 4096 (16 KB/block) the per-block sync/atomic
+// overhead was not amortized: ncu showed 66% DRAM at 91% occupancy (read-only,
+// should approach a copy's ~90%). Streaming more per block amortizes the fixed
+// sync cost and the long grid-stride loop gives each thread many in-flight loads
+// (MLP from ILP), so BW rises even as the block count falls. Measured GB300 knee:
+// 4096->16384->32768->65536 = 5402->6389->6613->6726 GB/s (67.5%->84.0% HBM SoL);
+// 131072 underfills back to 6529. 65536 is the peak.
+constexpr int ELEMENTS_PER_BLOCK = 65536;
 constexpr int WARPS_PER_BLOCK = BLOCK_SIZE / 32;
 
 namespace {
