@@ -827,17 +827,23 @@ SoL framing (B), measured 2026-06-09:
   isolating + removing the second trigger (deeper follow-up; the 1.62x bare-kernel result is the
   demonstrated ceiling if unblocked).
 - Kernel (B19, occupancy unblock ACHIEVED, SUPERSEDES B18): isolated the second trigger B18 was missing.
-  `import arch_config` (a GB10 / sm_121-only Triton SM-arch monkeypatch, applied unconditionally at
-  triton_matmul.py module load) is the other trigger: on sm_103 it misroutes the arch and the Triton 3.7
-  JIT emits the unselectable tcgen05.wait.st. Fixing BOTH triggers in triton_matmul.py (remove the dead
+  `import arch_config` is the other trigger: at import it runs configure_optimizations() (inductor config
+  + arch env vars + a Triton-compat patch), and empirically the kernel ABORTS with arch_config imported
+  but JITs cleanly WITHOUT it on sm_103. (Honest mechanism note: the obvious suspect,
+  triton.runtime.driver.set_active_device_capability(10,3), is RULED OUT -- it is a no-op on Triton 3.7,
+  where DriverConfig lacks that method; the exact configure_optimizations side effect that flips the
+  codegen is not yet isolated, likely the ensure_triton_compat Triton patch -- so the fix below is
+  empirical, not mechanism-proven.) Fixing BOTH triggers in triton_matmul.py (remove the dead
   num_warps:constexpr kernel param + guard `import arch_config` to compute capability (12,1)) makes
   triton_matmul.run_one JIT cleanly on Triton 3.7 / sm_103, so triton_matmul_schedules.
   _tcgen05_codegen_broken() -> False and the lab no longer skips. Verified end-to-end: harness
   labs/occupancy_tuning:proton_matmul_bm128_bn256_bk64 now SUCCEEDS at 1.212x vs the 64x64x32 baseline
   (verify-pass), where it previously SKIPPED entirely on GB300. The 256x256x64 tile is the demonstrated
   champion (~1.62x / 551 TFLOPS at 8192x8192x256 in a direct probe). A previously-dead GB300 lab is now
-  live; the lesson generalizes: an unconditional arch-patch import meant for one Blackwell SKU
-  (GB10/sm_121) can silently break codegen on another (GB300/sm_103) -- guard arch patches by capability.
+  live. Next lever (low-EV, named): isolate the exact configure_optimizations side effect (likely
+  ensure_triton_compat) and guard it centrally in arch_config by capability, which would protect any
+  other raw-triton tl.dot kernel on sm_103 (blast radius is narrow: most arch_config importers use
+  torch/cuBLAS/CUTLASS paths that already run).
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
