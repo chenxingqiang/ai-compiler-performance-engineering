@@ -23,6 +23,10 @@ are in "GB300 validated wins summary" + the SoL bullets (B1-B7) below. Headlines
   all-padding tiles (fully-invalid-tile early-return, or a K-loop guard where Triton rejects continue),
   1.40x (autotune) / 1.31x (persistent) on a skewed MoE histogram (the grouped-GEMM's real win over a
   naive padded bmm); balanced unchanged, all variants verify-pass (B11).
+- Discovery-sweep wins (config-tuning beyond the grouped GEMM): ch14 triton_persistent 3.6x kernel
+  (32-cubed tile -> 128x128x64, 12.76x harness, B13); ch10 persistent_matmul_tma 1.128x (B200->GB300
+  retune: wider N-tile + 8 warps, B14). Banked: ch12 fixed grids (work_queue atomic-bound,
+  uneven_partition already 216x; block-scaling is a no-op, B15).
 - Banked with evidence (forward progress, not dead ends): TMA 2D double-buffer (built + measured -19%,
   occupancy-dominated); ch02 P2P 762 GB/s (~80-85% of the NVLink5 pairwise ceiling, vendor-optimal);
   generic cutlass GEMM (also Sm80 but FP32 underfill-capped at 1024^3).
@@ -758,6 +762,27 @@ SoL framing (B), measured 2026-06-09:
   BLOCK_M=128 / BLOCK_N=256 / GROUP_M=4 / stages=4 (992 TFLOPS, unchanged), confirming the ~1.67x
   balanced gap vs cuBLAS is Triton tl.dot codegen on Blackwell, not a tile knob. Reverted the unused
   configs.
+- Kernel (B13, WIN), discovery-sweep beyond the grouped GEMM: ch14:triton_persistent (the harness's
+  Triton persistent batched GEMM, batch=64 / M=N=K=256 / fp16) hardcoded a 32x32x32 tile (no autotune),
+  which on Blackwell sm_103 spawns ~4096 tiny tiles (8x8 per 256-matrix x 64 batches) dominated by
+  per-tile overhead. A config sweep picked 128x128x64 / 8 warps / 3 stages. Matched same-node A/B (200
+  iters after 20 warmup, exact match vs torch.bmm): 0.0697 -> 0.019 ms = 3.6x kernel (30.8 -> 112
+  TFLOPS); harness 12.76x vs baseline, verification PASSED. Committed 2e947753.
+- Kernel (B14, WIN), B200->GB300 retune: ch10:persistent_matmul_tma (TMA-descriptor persistent matmul,
+  M=N=K=4096 / fp16) carried a B200-screened narrow static config (BLOCK_N=128, GROUP_M=2, 4 warps, 5
+  stages) that under-fed the Blackwell tensor cores. A GB300 sweep favored a wider N-tile + more warps:
+  BLOCK_N=256, GROUP_M=4, 8 warps, 4 stages. 5-trial same-node A/B (exact match vs torch.mm): 1232 +/- 2
+  -> 1390 +/- 4 TFLOPS = 1.128x kernel; harness 1.174x vs baseline (was ~1.04x), verification PASSED.
+  Committed ad9d6d6d.
+- Kernel (B15, banked-negative), ch12 fixed-grid underfill hypothesis REFUTED: the audit flagged
+  ch12:work_queue (hardcoded 32 blocks) and ch12:uneven_partition (hardcoded 192 blocks) as GB300
+  underfill. Measured: scaling work_queue's persistent grid from 32 blocks to full occupancy (via
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor) moved the harness 3.403 -> 3.443x (noise). The kernel
+  is bound by the single g_index atomic counter serializing work distribution, NOT by SM count (more
+  blocks just add atomic contention; the real lever would be a hierarchical counter, a deeper rewrite
+  that changes the lesson). uneven_partition is ALREADY 216x vs baseline (device work-stealing,
+  memory-bound) with no block-count headroom. Reverted the work_queue change; ch12 has no fixable
+  grid-size lever.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
