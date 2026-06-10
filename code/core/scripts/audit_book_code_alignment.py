@@ -28,7 +28,10 @@ ROOT = Path(__file__).resolve().parents[2]
 BOOK_DIR = ROOT / "book"
 REGISTRY_PATH = Path(__file__).with_name("book_sample_registry.json")
 
-LABEL_RE = re.compile(r"(?<![\w/.-])([A-Za-z][A-Za-z0-9_./-]*\.(?:cu|py|cuh))(?![\w.-])")
+# NOTE: the lookbehind intentionally allows a leading "/" or "." so path- and
+# ``./``-prefixed sample references (e.g. ``./add_sequential.py``) are still
+# captured by their basename; excluding them silently dropped real labels.
+LABEL_RE = re.compile(r"(?<![\w-])([A-Za-z][A-Za-z0-9_./-]*\.(?:cu|py|cuh))(?![\w.-])")
 CHAPTER_RE = re.compile(r"ch(\d+)\.md$")
 SAMPLE_SUFFIXES = {".cu", ".py", ".cuh"}
 GENERIC_TOKEN_SYNONYMS = {
@@ -379,6 +382,20 @@ def selected_chapters(args: argparse.Namespace) -> list[Path]:
     return [path for path in all_books if chapter_number(path) in wanted]
 
 
+def orphaned_registry_entries(
+    registry: dict[tuple[int, str], RegistryEntry],
+    chapter_results: dict[int, list[SampleResult]],
+) -> list[RegistryEntry]:
+    """Registry entries whose label never appears in the current book chapter text.
+
+    These are stale: the manuscript no longer prints the sample label they map, so
+    the audit never exercises them. Reported (non-fatal) so the registry stays
+    honest against the extracted ``book/chNN.md`` source.
+    """
+    present = {(ch, res.label) for ch, results in chapter_results.items() for res in results}
+    return [entry for key, entry in sorted(registry.items()) if key not in present]
+
+
 def chapter_summary(results: list[SampleResult]) -> dict[str, Any]:
     counts: dict[str, int] = {}
     for result in results:
@@ -445,6 +462,17 @@ def main() -> int:
 
     print_report(chapter_results, verbose=args.verbose)
 
+    orphans = orphaned_registry_entries(registry, chapter_results)
+    if orphans:
+        print("=" * 72)
+        print(f"ORPHANED REGISTRY ENTRIES (label not present in book/chNN.md): {len(orphans)}")
+        print("=" * 72)
+        for entry in orphans:
+            print(f"  ch{entry.chapter}: {entry.label}  ({entry.classification})")
+        print("  These map sample labels the manuscript no longer prints; prune or")
+        print("  re-add the labels to the book. Non-fatal (audit exit code unchanged).")
+        print()
+
     if args.json is not None:
         payload = {
             "chapters": {
@@ -454,6 +482,7 @@ def main() -> int:
                 }
                 for chapter, results in sorted(chapter_results.items())
             },
+            "orphaned_registry": [asdict(entry) for entry in orphans],
             "summary": {
                 "chapters": len(chapter_results),
                 "samples": sum(len(results) for results in chapter_results.values()),
@@ -463,6 +492,7 @@ def main() -> int:
                     for result in results
                     if result.status == "hard_mismatch"
                 ),
+                "orphaned_registry_entries": len(orphans),
             },
         }
         args.json.parent.mkdir(parents=True, exist_ok=True)

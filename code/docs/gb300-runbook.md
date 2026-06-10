@@ -745,6 +745,19 @@ SoL framing (B), measured 2026-06-09:
   (440.4 -> 579.8 useful-TFLOPS), balanced neutral. All three grouped kernels now skip padding tiles.
   Lesson update to B10: the Python/Triton frontier DOES yield to deep framework-specific work, but the
   lever here is FLOP-elision (skip padding work), not a tile knob.
+- Kernel (B12, WIN-regime of B11 + banked autotune lever). (a) Swept the grouped-GEMM padding fraction
+  to locate where the B11 skip makes the grouped kernel BEAT a naive cuBLAS torch.bmm-over-padded (the
+  alternative an MoE author would otherwise write). Synthetic E=4 / K=2048 / N=3072 / FP16, counts
+  geometric from 2048, 60-iter timing: pad_frac 0.00 grouped 1.66x slower, 0.37 1.25x, 0.53 1.05x
+  (parity), and at pad_frac >= ~0.6 the grouped kernel WINS (0.62: 0.062 vs 0.063 ms = 0.99x; 0.70:
+  0.875x). Crossover ~pad_frac 0.55-0.6. Takeaway for the lab: with the padding-skip, the grouped GEMM
+  is the right choice over a padded batched GEMM exactly when expert routing is heavily imbalanced (a
+  few hot experts, many cold), which is the realistic MoE regime; below that crossover cuBLAS's faster
+  per-tile MMA wins despite the padding waste. (b) Banked-negative on the residual balanced gap: added
+  BLOCK_M=256 + GROUP_M=8 to the @triton.autotune set; the autotuner still picks
+  BLOCK_M=128 / BLOCK_N=256 / GROUP_M=4 / stages=4 (992 TFLOPS, unchanged), confirming the ~1.67x
+  balanced gap vs cuBLAS is Triton tl.dot codegen on Blackwell, not a tile knob. Reverted the unused
+  configs.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,

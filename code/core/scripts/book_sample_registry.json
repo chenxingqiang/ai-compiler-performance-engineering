@@ -149,6 +149,18 @@
       "notes": "This is a TorchInductor debug artifact emitted under TORCH_COMPILE_DEBUG, not a tracked repo sample."
     },
     {
+      "chapter": 14,
+      "label": "torch/_dynamo/convert_frame.py",
+      "classification": "pseudocode",
+      "notes": "PyTorch library path shown in a torch.compile recompilation/guard traceback, not a repo sample."
+    },
+    {
+      "chapter": 14,
+      "label": "torch/nn/modules/module.py",
+      "classification": "pseudocode",
+      "notes": "PyTorch library path shown in a torch.compile recompilation/guard traceback, not a repo sample."
+    },
+    {
       "chapter": 16,
       "label": "radix_attention_example.py",
       "classification": "pseudocode",
