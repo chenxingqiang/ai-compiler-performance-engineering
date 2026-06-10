@@ -839,8 +839,11 @@ SoL framing (B), measured 2026-06-09:
   _tcgen05_codegen_broken() -> False and the lab no longer skips. Verified end-to-end: harness
   labs/occupancy_tuning:proton_matmul_bm128_bn256_bk64 now SUCCEEDS at 1.212x vs the 64x64x32 baseline
   (verify-pass), where it previously SKIPPED entirely on GB300. The 256x256x64 tile is the demonstrated
-  champion (~1.62x / 551 TFLOPS at 8192x8192x256 in a direct probe). A previously-dead GB300 lab is now
-  live. Next lever (low-EV, named): isolate the exact configure_optimizations side effect (likely
+  champion (~1.62x / 551 TFLOPS at 8192x8192x256 in a direct probe), now SHIPPED as the variant
+  optimized_proton_matmul_bm256_bn256_bk64.py: harness 1.306x vs the 64x64x32 baseline (verify-pass),
+  the lab's new best arm (prior best was the 128x256x64 wide-N variant at 1.212x). A previously-dead
+  GB300 lab is now live AND optimized. Next lever (low-EV, named): isolate the exact
+  configure_optimizations side effect (likely
   ensure_triton_compat) and guard it centrally in arch_config by capability, which would protect any
   other raw-triton tl.dot kernel on sm_103 (blast radius is narrow: most arch_config importers use
   torch/cuBLAS/CUTLASS paths that already run).
