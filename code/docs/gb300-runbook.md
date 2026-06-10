@@ -19,9 +19,10 @@ are in "GB300 validated wins summary" + the SoL bullets (B1-B7) below. Headlines
   tma_copy 39.2% -> 63.7% (1.63x, runtime div/mod -> compile-time shift/mask).
 - Frontier unblock: the sm_103a fix loads the whole tcgen05/TMEM family (blackwell_matmul 126x, MoE
   ladder 41.6x) that was unloadable on Blackwell Ultra.
-- MoE grouped GEMM (Triton): the full_stack + standard grouped kernels now skip all-padding tiles
-  (fully-invalid-tile early-return), 1.40x on a skewed MoE histogram (0.162 -> 0.116 ms, the
-  grouped-GEMM's real win over a naive padded bmm); balanced unchanged, all variants verify-pass (B11).
+- MoE grouped GEMM (Triton): all three grouped kernels (full_stack / standard / persistent) now skip
+  all-padding tiles (fully-invalid-tile early-return, or a K-loop guard where Triton rejects continue),
+  1.40x (autotune) / 1.31x (persistent) on a skewed MoE histogram (the grouped-GEMM's real win over a
+  naive padded bmm); balanced unchanged, all variants verify-pass (B11).
 - Banked with evidence (forward progress, not dead ends): TMA 2D double-buffer (built + measured -19%,
   occupancy-dominated); ch02 P2P 762 GB/s (~80-85% of the NVLink5 pairwise ceiling, vendor-optimal);
   generic cutlass GEMM (also Sm80 but FP32 underfill-capped at 1024^3).
@@ -738,10 +739,12 @@ SoL framing (B), measured 2026-06-09:
   1.321x. Balanced (no padding) is neutral (979.7 -> 988.6 TFLOPS: early-return is a correct no-op,
   full-tile +0.9%), so the default benchmark and its verification are unchanged. All 4 variants
   (baseline / large_tiles / full_stack / persistent) verify-pass on both histograms. The persistent
-  kernel kept the masked path because this Triton (NGC 26.05) rejects `continue` in the tile loop
-  (`unsupported AST node type: Continue`), so the skip rides on the autotune + standard kernels. Lesson
-  update to B10: the Python/Triton frontier DOES yield to deep framework-specific work, but the lever
-  here is FLOP-elision (skip padding work), not a tile knob.
+  kernel gets the same skip via a K-loop guard (`if pid_m*BLOCK_M < valid_rows:`) rather than an
+  early-return, because this Triton (NGC 26.05) rejects `continue` in the persistent tile loop
+  (`unsupported AST node type: Continue`); same-node A/B 0.234 -> 0.178 ms = 1.31x on skewed
+  (440.4 -> 579.8 useful-TFLOPS), balanced neutral. All three grouped kernels now skip padding tiles.
+  Lesson update to B10: the Python/Triton frontier DOES yield to deep framework-specific work, but the
+  lever here is FLOP-elision (skip padding work), not a tile knob.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,

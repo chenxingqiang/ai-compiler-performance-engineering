@@ -289,15 +289,20 @@ def grouped_gemm_persistent_kernel(
         )
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-        for _ in range(0, k_dim, BLOCK_K):
-            mask_a = (offs_m[:, None] < valid_rows) & (offs_k[None, :] < k_dim)
-            mask_b = (offs_k[:, None] < k_dim) & (offs_n[None, :] < n_dim)
-            a = tl.load(a_ptrs, mask=mask_a, other=0.0)
-            b = tl.load(b_ptrs, mask=mask_b, other=0.0)
-            acc += tl.dot(a, b, out_dtype=tl.float32)
-            offs_k += BLOCK_K
-            a_ptrs += BLOCK_K * stride_ak
-            b_ptrs += BLOCK_K * stride_bk
+        # Skip the GEMM on fully-invalid (all-padding) tiles (see the autotune kernel).
+        # This Triton rejects `continue` in the persistent tile loop, so guard the
+        # K-loop instead: on a skipped tile acc stays zero and the masked route-load +
+        # masked store below are no-ops, so only the wasted MMA is elided.
+        if pid_m * BLOCK_M < valid_rows:
+            for _ in range(0, k_dim, BLOCK_K):
+                mask_a = (offs_m[:, None] < valid_rows) & (offs_k[None, :] < k_dim)
+                mask_b = (offs_k[:, None] < k_dim) & (offs_n[None, :] < n_dim)
+                a = tl.load(a_ptrs, mask=mask_a, other=0.0)
+                b = tl.load(b_ptrs, mask=mask_b, other=0.0)
+                acc += tl.dot(a, b, out_dtype=tl.float32)
+                offs_k += BLOCK_K
+                a_ptrs += BLOCK_K * stride_ak
+                b_ptrs += BLOCK_K * stride_bk
 
         route_weights = tl.load(
             route_w_ptr + expert_id * stride_wb + offs_m * stride_wm,
