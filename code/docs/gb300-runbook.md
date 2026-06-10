@@ -568,7 +568,7 @@ verification-passed. Speedups are vs the lab's own naive/baseline arm (the book'
 | continuous_batching (ch04) | 3.07x | serving | |
 | dataparallel (ch04) | 2.68x | comm | |
 | warp_specialized_two_pipelines_multistream (ch11) | 2.36x | kernel | earlier timeout fix |
-| dsmem_reduction_warp_specialized (ch10) | 2.80x | kernel, HBM BW, sync-amortization | 6729 GB/s = 84% HBM SoL (ncu DRAM 65.9%->78.6%); ELEMENTS_PER_BLOCK 4096->65536 amortizes cluster.sync + DSMEM atomic, grid-stride MLP holds BW as blocks fall (5402->6729, 1.245x); was 2.24x harness, verify-passed. v3 sibling: 54.5%->69.8% (4363->5585, 1.28x, harness 2.33x) |
+| dsmem_reduction_warp_specialized (ch10) | 2.80x | kernel, HBM BW, sync-amortization | 6729 GB/s = 84% HBM SoL (ncu DRAM 65.9%->78.6%); ELEMENTS_PER_BLOCK 4096->65536 amortizes cluster.sync + DSMEM atomic, grid-stride MLP holds BW as blocks fall (5402->6729, 1.245x); was 2.24x harness, verify-passed. v3 + cluster_atomic siblings: 54.5%->69.8% and 47%->66.6% (1.28x / 1.42x, harness 2.33x each) |
 | matmul_tcgen05_pipelined (ch10) | 2.32x | kernel, tcgen05 | 28.2% FP16 tensor-core SoL (measured: 1057 TFLOPS) |
 | cutlass_gemm_fp8 (ch09) | 1.72x | kernel, FP8 tile-tune, beats cuBLAS | 3432 TFLOPS = 45.7% FP8 SoL (deeper K=128 tile, 256x128x64 -> 128x256x128, 1.38x over default); 1.12x FASTER than cuBLAS-FP8 (3054); verify exact |
 | tcgen05_cluster_pipeline (ch10) | 1.58x | kernel, tcgen05 | below cuBLAS tensor-core SoL (P2 teaching) |
@@ -657,6 +657,11 @@ SoL framing (B), measured 2026-06-09:
   SoL, ncu DRAM 65.9% -> 78.6%, harness 2.24x -> 2.80x); v3 (CLUSTER_SIZE=2) 4363 -> 5585 GB/s (1.28x,
   54.5% -> 69.8%, harness 2.33x). Both verify-passed (sum exact), DSMEM-cluster lesson intact. Same
   class as B3 (a real fixable gap behind a refuted first hypothesis), found by the discovery sweep.
+  Sibling sweep: the same lever lifts dsmem_reduction_cluster_atomic (CLUSTER_SIZE=4, DSMEM-atomic)
+  47% -> 66.6% HBM SoL (0.068 -> 0.048 ms, 1.42x, harness 2.33x, verify exact); its DSMEM-atomic
+  contention caps it below the warp_specialized 84%. The base dsmem_reduction is a pedagogical
+  "shows-the-pattern" demo (left as-is) and atomic_reduction is non-cluster (contention-bound at 67%,
+  no cluster.sync to amortize) -- both banked. ch10 reduction family swept.
 - Comm (B7, banked-negative), Phase-1 discovery-sweep, ch02 multi-GPU P2P transfer:
   optimized_memory_transfer_multigpu (single-stream cudaMemcpyPeer GPU0->1, 400 MB) measured 762.76
   GB/s vs the host-staged baseline 124.62 GB/s (6.12x, the lab's P2P lesson). That is ~80-85% of the
