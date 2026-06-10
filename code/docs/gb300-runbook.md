@@ -810,6 +810,18 @@ SoL framing (B), measured 2026-06-09:
   upstream/large): upstream Triton tcgen05 codegen (unblocks occupancy + the grouped-GEMM gap), a
   hand-written tcgen05/TMA Triton grouped kernel, and end-to-end/fusion (the MoE journey's higher ladder
   levels are already at 41.6x).
+- Kernel (B18, occupancy unblock probe REFUTED, refines B17): isolated that occupancy's matmul_kernel
+  uniquely declares a DEAD `num_warps: tl.constexpr` kernel param (shadowing Triton's launch
+  meta-param). A bare standalone copy of the kernel WITHOUT that param JITs + runs cleanly on Triton 3.7
+  / sm_103 across all tiles (256x256x64 reached ~551 TFLOPS = 1.62x over the 64x64x32 baseline's 340 at
+  8192x8192x256). BUT removing the param from triton_matmul.py did NOT unblock the real path:
+  triton_matmul.run_one (which also runs enable_tf32() + imports arch_config at module load) STILL aborts
+  with the same "LLVM ERROR: Cannot select tcgen05.wait.st". So the dead param is ONE trigger, not the
+  only one; a second trigger lives in the module context (enable_tf32 / arch_config / module-level
+  state). The lab stays correctly skip-guarded; the edits were reverted (a half-applied unblock would
+  make the lab SIGABRT instead of skip cleanly). Full unblock needs the repo-pinned Triton 3.5.0 or
+  isolating + removing the second trigger (deeper follow-up; the 1.62x bare-kernel result is the
+  demonstrated ceiling if unblocked).
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
