@@ -847,6 +847,23 @@ SoL framing (B), measured 2026-06-09:
   ensure_triton_compat) and guard it centrally in arch_config by capability, which would protect any
   other raw-triton tl.dot kernel on sm_103 (blast radius is narrow: most arch_config importers use
   torch/cuBLAS/CUTLASS paths that already run).
+- Kernel (B20, ch13:quantization 0.17x regression root-caused, measured bank): the flagged
+  ch13:quantization "optimization" (INT8 dynamic-quant via torch._int_mm + torch.compile max-autotune)
+  runs at 0.17x = 5.9x SLOWER than the fp32 baseline on GB300. Measured the components at the lab's
+  shape (M=8192, K=N=4096): fp32-tf32 linear 0.273 ms, fp16 0.149 ms, but torch._int_mm 3.65 ms -- 13.4x
+  slower than tf32 and 24.5x slower than fp16. torch._int_mm's INT8 GEMM is not optimized for Blackwell
+  Ultra (sm_103); it dominates the regression (quant + dequant add only ~0.5 ms: 3.65 -> 4.14 ms full
+  forward). Two walls, neither lab-fixable: (1) torch._int_mm is an upstream PyTorch sm_103 issue;
+  (2) even a perfect INT8 GEMM cannot win here -- the per-call dynamic-quant overhead (~0.5 ms) alone
+  exceeds the fp16 time (0.149 ms), so INT8 dynamic-quant inherently loses to fp16 on Blackwell at this
+  shape. Bank: a true regression on Blackwell, not a fixable optimization.
+- Frontier note (measured close): every remaining repo perf lever is now blocked by an UPSTREAM sm_103
+  issue, not a lab bug. The grouped-GEMM 1.67x balanced gap and the occupancy/raw-triton tcgen05 path
+  are Triton-3.7 tcgen05.wait.st codegen (needs Triton 3.5 / upstream; a hand-written tcgen05 Triton
+  kernel would hit the same LLVM-select abort on this stack); INT8 is torch._int_mm on sm_103. The
+  standalone single-kernel lever frontier (arch-tag, underfill, sync-amortization, padding-skip,
+  tile-retile, skip-guard-unblock) is harvested. Further perf gains require an upstream Triton/torch fix
+  or the repo-pinned Triton 3.5.0 (not in the GB300 NGC image), not more standalone tuning.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
