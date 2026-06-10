@@ -586,7 +586,19 @@ SoL framing (B), measured 2026-06-09:
   71%->52%, duration 43.6->25.6 us); the harness ch07:tma_copy target stays green. Next lever (banked):
   the residual gap to ~90% is the single-tile barrier serialization + Long Scoreboard smem latency; a
   double-buffered multi-tile TMA pipeline could close it but is smem-limited (32 KB/block -> 6
-  blocks/SM, and double-buffering lowers occupancy), so the EV is uncertain.
+  blocks/SM, and double-buffering lowers occupancy), so the EV is uncertain. Phase-2 follow-up
+  (2026-06-09, MEASURED): re-ncu confirmed the limiter is smem-occupancy (Block Limit Shared Mem = 6
+  at 32 KB/block; 75% theoretical / 61.3% achieved) with DRAM 42.7% (latency-bound) and SM 52.8%. A
+  2-stage double-buffer (grid-stride tile loop, 2 input + 1 output stage in 48 KB dynamic smem,
+  prefetching the next tile's TMA load during the current combine) was BUILT + MEASURED: 5109 -> 4142
+  GB/s (63.9% -> 51.8%), a 19% REGRESSION. Reverted. Root cause: the single-tile design already
+  overlaps across 4096 independent blocks (6 blocks/SM), so the grid-stride double-buffer trades that
+  block-level parallelism for within-block pipelining at LOWER occupancy (48 KB -> 4 blocks/SM = 50%)
+  plus a per-tile store serialization (cp_async_bulk_wait_group_read<0>). Banked measured-negative:
+  the 2D TMA copy's 63.9% is near its design ceiling -- the per-tile descriptor + barrier overhead is
+  the cost of the TMA abstraction (a raw float4 LDG.128 copy hits 89.8% on the same device). No
+  next_lever of value (a smaller-tile higher-occupancy variant changes the non-square TMA coord
+  convention; the abstraction overhead is inherent to per-tile TMA).
 - Memory (B4), optimized_hbm_copy: two stacked limiters found by the same Phase-5 hunt. (1) The grid
   was hardcoded `<<<256, 256>>>` = ~1.7 blocks/SM on a 152-SM GB300, leaving the machine nearly empty.
   Sizing it to the device (num_sms*32) raised achieved occupancy from ~20% to 90% (ncu). (2) But BW
