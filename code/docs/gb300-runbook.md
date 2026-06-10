@@ -4,6 +4,23 @@ How to run this repo's benchmark harness on a single GB300 node (Grace + Blackwe
 Ultra, compute capability 10.3 / `sm_103`, 4 GPUs), what was fixed to make it
 GB300-correct, and the open issues found during validation.
 
+## GB300 optimization wins (TL;DR)
+
+Every win is verification-passed; full per-win descriptors, SoL grounding, and the banked negatives
+are in "GB300 validated wins summary" + the SoL bullets (B1-B7) below. Headlines:
+- GEMM on Blackwell tensor cores: ch09 cublaslt_gemm_fp4 706x vs naive (~7107 TFLOPS NVFP4); ch09
+  cutlass_gemm_fp16 2.66x kernel (440 -> 1171 TFLOPS, 31.2% FP16 SoL, harness 12.1x -> 32.16x) by
+  porting the lab off Ampere arch::Sm80 (it had been running the Ampere HMMA path on Blackwell) to the
+  Sm100 tcgen05 collective.
+- Memory bandwidth: ch10 dsmem_reduction_warp_specialized 67.5% -> 84% HBM SoL (harness 2.80x; v3
+  54.5% -> 69.8%) by amortizing the cluster-sync overhead (ELEMENTS_PER_BLOCK 4096 -> 65536); ch07
+  tma_copy 39.2% -> 63.7% (1.63x, runtime div/mod -> compile-time shift/mask).
+- Frontier unblock: the sm_103a fix loads the whole tcgen05/TMEM family (blackwell_matmul 126x, MoE
+  ladder 41.6x) that was unloadable on Blackwell Ultra.
+- Banked with evidence (forward progress, not dead ends): TMA 2D double-buffer (built + measured -19%,
+  occupancy-dominated); ch02 P2P 762 GB/s (~80-85% of the NVLink5 pairwise ceiling, vendor-optimal);
+  generic cutlass GEMM (also Sm80 but FP32 underfill-capped at 1024^3).
+
 ## Hardware confirmed
 - 4x NVIDIA GB300, compute capability 10.3 (`blackwell_ultra` / `sm_103`), 284 GB
   HBM each, driver 580.159.03, Grace (aarch64) host.
