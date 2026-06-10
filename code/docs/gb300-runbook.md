@@ -795,6 +795,21 @@ SoL framing (B), measured 2026-06-09:
   finding. Banked: the gap stays diagnosed-as-codegen (B12); next lever = a hand-written tcgen05 /
   TMA-descriptor Triton grouped kernel matching cuBLAS's 2-SM tensor-core path (large, uncertain,
   likely-upstream-Triton). Injected pod torn down (experiment=aisp-ggemm-zymtrace-20260610).
+- Kernel (B17, round-2 sweep close, mostly banked): after the ch14/ch10 retile wins, a second sweep of
+  the remaining harness-backed fixed-tile candidates found no new clear breakthrough. (a)
+  labs/occupancy_tuning:proton_matmul (8192x8192x256 tile-sweep lab) is BLOCKED on GB300: the matmul
+  kernel JITs to a tcgen05.wait.st intrinsic LLVM cannot select on Triton 3.7 / sm_103 ("LLVM ERROR:
+  Cannot select intrinsic llvm.nvvm.tcgen05.wait.st", an uncatchable abort; the lab's own
+  _tcgen05_codegen_broken() skip-guard is correct). Setting num_stages=3 does not help; the fix is the
+  repo-pinned Triton 3.5.0, an upstream/toolchain matter. (b) labs/top_k_kernel:top_k_kernel (Triton)
+  is already 7.79x vs baseline (well-optimized; BLOCK_N=16 retile headroom uncertain on the non-GEMM
+  top-k scoring shape). (c) labs/flashattention_gluon runs (not blocked) but is Tier-3 (attention, far
+  from the FlashInfer ceiling); ch14's demo/batched_bench aux paths are a known-good retile propagation
+  but auxiliary/low-value. Banked: the standalone single-kernel lever frontier (arch-tag, underfill,
+  sync-amortization, padding-skip, tile-retile) is HARVESTED across the repo. Named next levers (all
+  upstream/large): upstream Triton tcgen05 codegen (unblocks occupancy + the grouped-GEMM gap), a
+  hand-written tcgen05/TMA Triton grouped kernel, and end-to-end/fusion (the MoE journey's higher ladder
+  levels are already at 41.6x).
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
