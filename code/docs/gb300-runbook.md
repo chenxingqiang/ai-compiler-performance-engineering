@@ -625,6 +625,13 @@ SoL framing (B), measured 2026-06-09:
   SoL, ncu DRAM 65.9% -> 78.6%, harness 2.24x -> 2.80x); v3 (CLUSTER_SIZE=2) 4363 -> 5585 GB/s (1.28x,
   54.5% -> 69.8%, harness 2.33x). Both verify-passed (sum exact), DSMEM-cluster lesson intact. Same
   class as B3 (a real fixable gap behind a refuted first hypothesis), found by the discovery sweep.
+- Comm (B7, banked-negative), Phase-1 discovery-sweep, ch02 multi-GPU P2P transfer:
+  optimized_memory_transfer_multigpu (single-stream cudaMemcpyPeer GPU0->1, 400 MB) measured 762.76
+  GB/s vs the host-staged baseline 124.62 GB/s (6.12x, the lab's P2P lesson). That is ~80-85% of the
+  per-direction NVLink5 pairwise ceiling (nvidia-smi: 53.125 GB/s/link), so the single cudaMemcpyPeer
+  is already near-ceiling: a contiguous P2P copy is DMA-pipelined across the links, so multi-stream /
+  chunked splitting contends for the same links (no BW gain) and bidirectional overlap would change
+  the one-direction demo. Banked: near-ceiling vendor primitive, no lesson-preserving lever.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
