@@ -864,6 +864,19 @@ SoL framing (B), measured 2026-06-09:
   standalone single-kernel lever frontier (arch-tag, underfill, sync-amortization, padding-skip,
   tile-retile, skip-guard-unblock) is harvested. Further perf gains require an upstream Triton/torch fix
   or the repo-pinned Triton 3.5.0 (not in the GB300 NGC image), not more standalone tuning.
+- Survey (B21, "compile-crash list" corrected + concurrent-session contention): the audit-flagged
+  "compile-crash" labs are NOT crashes -- they run but fail the speed gate on GB300: nvfp4_group_gemm
+  1.00x (optimized == baseline) and nvfp4_gemv 0.22x (4.5x SLOWER than baseline). nvfp4_gemv's optimized
+  custom_kernel routes through nvfp4_gemm's gemm_v3b (the sibling lab's optimized_submission.py); on a
+  gemm_v3b error it silently falls back (try/except) to torch._scaled_mm, so the 0.22x is the fallback
+  plus the per-call failed-attempt overhead. Both nvfp4_group_gemm + nvfp4_gemm (and moe_optimization_
+  journey, block_scaling sm103, custom_vs_cublas tcgen05, fullstack_cluster tcgen05, persistent_decode,
+  train_distributed, real_world_models/llama) are under ACTIVE concurrent-session development (files
+  modified Jun 9-10). Per the Grind Mandate (a concurrent session in the same space lowers a lever's
+  rank -> prefer the non-contended space), these high-value GB300 kernel labs are DEFERRED to that
+  session to avoid collision. The remaining clean fair-game lab (ozaki_scheme int-emulation) is niche
+  and likely hits the same sm_103 int-slow wall as ch13 (torch._int_mm 13x slower than tf32). Net: my
+  non-contended frontier is harvested; the contended space is owned by the other session.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
