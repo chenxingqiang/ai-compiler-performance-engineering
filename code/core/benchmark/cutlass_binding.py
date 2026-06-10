@@ -59,11 +59,37 @@ def _load_cutlass_module(verbose: bool = False):
     repo_root = Path(__file__).resolve().parents[2]
     cuda_source = repo_root / "core" / "benchmark" / "cuda" / "cutlass_gemm_extension.cu"
     include_dir = _detect_cutlass_include()
-    extra_flags = ["-O3", "--use_fast_math", "-std=c++17"]
+    # make_cute_packed_stride lives in cutlass/tools/util/include (not the main
+    # include dir), so add it alongside, preferring the sibling of the detected
+    # include then the repo-vendored copy.
+    include_dirs = [include_dir]
+    for util in (
+        include_dir.parent / "tools" / "util" / "include",
+        repo_root / "third_party" / "cutlass" / "tools" / "util" / "include",
+    ):
+        if util.exists() and util not in include_dirs:
+            include_dirs.append(util)
+            break
+    # The CUTLASS 3.x Sm100 collective (tcgen05 / TMA) must be built for the arch
+    # 'a' variant (sm_103a on GB300, sm_100a on B200); torch auto-detect emits plain
+    # sm_103, which cannot compile the tcgen05/TMA path. An explicit -gencode makes
+    # torch respect it (and skip its default arch). cute also needs the relaxed
+    # constexpr / extended lambda flags.
+    arch = "100a"
+    try:
+        major, minor = torch.cuda.get_device_capability()
+        arch = f"{major}{minor}a"
+    except Exception:
+        pass
+    extra_flags = [
+        "-O3", "--use_fast_math", "-std=c++17",
+        "--expt-relaxed-constexpr", "--expt-extended-lambda",
+        f"-gencode=arch=compute_{arch},code=sm_{arch}",
+    ]
     return load_cuda_extension(
         extension_name="cutlass_gemm_ext",
         cuda_source_file=str(cuda_source),
-        include_dirs=[include_dir],
+        include_dirs=include_dirs,
         extra_cuda_cflags=extra_flags,
         extra_ldflags=["-lcublas"],
         verbose=verbose,

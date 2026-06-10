@@ -9,7 +9,8 @@ GB300-correct, and the open issues found during validation.
 Every win is verification-passed; full per-win descriptors, SoL grounding, and the banked negatives
 are in "GB300 validated wins summary" + the SoL bullets (B1-B7) below. Headlines:
 - GEMM on Blackwell tensor cores: ch09 cublaslt_gemm_fp4 706x vs naive (~7107 TFLOPS NVFP4); ch09
-  cutlass_gemm_fp16 2.66x kernel (440 -> 1171 TFLOPS, 31.2% FP16 SoL, harness 12.1x -> 32.16x) by
+  cutlass_gemm_fp16 2.66x kernel (440 -> 1171 TFLOPS, 31.2% FP16 SoL, harness 12.1x -> 32.16x) and
+  ch14 cublas_vs_cutlass CUTLASS arm 3.0x kernel (531 -> 1596 TFLOPS, now matches cuBLAS) both by
   porting the lab off Ampere arch::Sm80 (it had been running the Ampere HMMA path on Blackwell) to the
   Sm100 tcgen05 collective.
 - Memory bandwidth: ch10 dsmem_reduction_warp_specialized 67.5% -> 84% HBM SoL (harness 2.80x; v3
@@ -661,6 +662,20 @@ SoL framing (B), measured 2026-06-09:
   is already near-ceiling: a contiguous P2P copy is DMA-pipelined across the links, so multi-stream /
   chunked splitting contends for the same links (no BW gain) and bidirectional overlap would change
   the one-direction demo. Banked: near-ceiling vendor primitive, no lesson-preserving lever.
+- Kernel (B8), Phase-1 discovery-sweep (a repo-wide arch::Sm80 scan, after B5): the ch14
+  cublas_vs_cutlass CUTLASS arm (core/benchmark/cuda/cutlass_gemm_extension.cu, a PyTorch extension at
+  M=N=K=4096 FP16) declared cutlass::arch::Sm80, so on Blackwell it ran the Ampere HMMA path at 531.5
+  TFLOPS = 3x SLOWER than cuBLAS (1576 TFLOPS), making the lab's cuBLAS-vs-CUTLASS teaching comparison
+  misleading (the gap was the arch tag, not the library). Ported the extension to the CUTLASS 3.x
+  Sm100 collective (GemmUniversalAdapter, TMA 2SM, RowMajor A/B, half_t) + fixed the JIT build
+  (cutlass_binding.py) to emit sm_103a (the tcgen05/TMA path needs the arch 'a' variant; torch
+  auto-detect gives plain sm_103) and to add the cutlass tools/util include (make_cute_packed_stride):
+  531.5 -> 1595.8 TFLOPS (3.0x kernel, 14.2% -> 42.6% FP16 SoL), now 1.018x vs cuBLAS (matched, was
+  0.337x), maxdiff 0.0 vs cuBLAS (identical result). The comparison is now fair (both on Blackwell
+  tensor cores). Measured by direct timing (the harness classifies this comparison pair as
+  informational/skipped). Same root cause as B5 (ch09 cutlass_gemm_fp16); the arch-tag scan found
+  both. The sibling labs/top_k_kernel/top_k_kernel_cuda.cu scoring GEMM carries the same Sm80 tag
+  (next lever).
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
