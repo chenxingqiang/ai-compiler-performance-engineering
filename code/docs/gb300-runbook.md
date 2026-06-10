@@ -12,7 +12,8 @@ are in "GB300 validated wins summary" + the SoL bullets (B1-B7) below. Headlines
   cutlass_gemm_fp16 2.66x kernel (440 -> 1171 TFLOPS, 31.2% FP16 SoL, harness 12.1x -> 32.16x) and
   ch14 cublas_vs_cutlass CUTLASS arm 3.0x kernel (531 -> 1596 TFLOPS, now matches cuBLAS) both by
   porting the lab off Ampere arch::Sm80 (it had been running the Ampere HMMA path on Blackwell) to the
-  Sm100 tcgen05 collective.
+  Sm100 tcgen05 collective; ch09 cutlass_gemm_fp8 tile-tuned (deeper K=128) 2481 -> 3432 TFLOPS (1.38x,
+  45.7% FP8 SoL), now 1.12x FASTER than cuBLAS-FP8.
 - Memory bandwidth: ch10 dsmem_reduction_warp_specialized 67.5% -> 84% HBM SoL (harness 2.80x; v3
   54.5% -> 69.8%) by amortizing the cluster-sync overhead (ELEMENTS_PER_BLOCK 4096 -> 65536); ch07
   tma_copy 39.2% -> 63.7% (1.63x, runtime div/mod -> compile-time shift/mask).
@@ -569,6 +570,7 @@ verification-passed. Speedups are vs the lab's own naive/baseline arm (the book'
 | warp_specialized_two_pipelines_multistream (ch11) | 2.36x | kernel | earlier timeout fix |
 | dsmem_reduction_warp_specialized (ch10) | 2.80x | kernel, HBM BW, sync-amortization | 6729 GB/s = 84% HBM SoL (ncu DRAM 65.9%->78.6%); ELEMENTS_PER_BLOCK 4096->65536 amortizes cluster.sync + DSMEM atomic, grid-stride MLP holds BW as blocks fall (5402->6729, 1.245x); was 2.24x harness, verify-passed. v3 sibling: 54.5%->69.8% (4363->5585, 1.28x, harness 2.33x) |
 | matmul_tcgen05_pipelined (ch10) | 2.32x | kernel, tcgen05 | 28.2% FP16 tensor-core SoL (measured: 1057 TFLOPS) |
+| cutlass_gemm_fp8 (ch09) | 1.72x | kernel, FP8 tile-tune, beats cuBLAS | 3432 TFLOPS = 45.7% FP8 SoL (deeper K=128 tile, 256x128x64 -> 128x256x128, 1.38x over default); 1.12x FASTER than cuBLAS-FP8 (3054); verify exact |
 | tcgen05_cluster_pipeline (ch10) | 1.58x | kernel, tcgen05 | below cuBLAS tensor-core SoL (P2 teaching) |
 | nvlink_topology_aware (ch04) | 1.48x | comm, routing | |
 | eos_sync_polling (ch18) | 1.26x | serving | |
@@ -680,6 +682,17 @@ SoL framing (B), measured 2026-06-09:
   and the Sm80 path already beats cuBLAS there (1.10-1.41x), so the tensor-core arch barely matters and
   a Sm100 dense-tuned 256x128 tile would likely regress the tall-skinny K=128 GEMM. Arch-tag scan
   complete: ch09 + ch14 ported (wins); top_k + generic cutlass_gemm banked.
+- Kernel (B9), Phase-1 discovery-sweep (cuBLAS-parity check -> tile-tune): the ch09 CUTLASS FP8 GEMM
+  (optimized_cutlass_gemm_fp8, 4096^3, already Sm100) ran at 2481 TFLOPS = 33% FP8 SoL with the
+  default 256x128x64 2SM tile, which a parity probe showed was 1.23x SLOWER than cuBLAS-FP8
+  (torch._scaled_mm = 3054 TFLOPS / 40.7% SoL) -- real tile headroom. Swept the tile on GB300:
+  deepening the K tile (64 -> 128) is the dominant lever (it amortizes the FP8 mainloop), with 128x256
+  MN best. 128x256x128 peaks at 3432 TFLOPS (mean of 3: 3431.6/3426.6/3438.1) = 45.7% FP8 SoL, 1.38x
+  the default, and 1.12x FASTER than cuBLAS-FP8 (a vendor-beating P4 result). Verify EXACT (checksum
+  1.2853684480e+09 == baseline), harness 1.72x (was ~1.24x). Sweep: 256x128x64 2481, 128x256x64 2492,
+  256x256x64 3007, 256x256x128 3353, 128x256x128 3432 (best), 128x128x128 2756, 128x256x256 3332. Same
+  lab family as B5/B8 but the lever is the K-tile depth, not the arch (already Sm100); the parity check
+  vs cuBLAS is what surfaced the headroom.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
