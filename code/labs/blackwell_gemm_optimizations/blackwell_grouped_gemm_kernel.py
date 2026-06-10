@@ -54,6 +54,11 @@ def grouped_gemm_batched_kernel(
     pid_n = tile_in_group // group_size_m
 
     valid_rows = tl.load(counts_ptr + expert_id)
+    # Skip fully-invalid tiles (see grouped_gemm_autotune_kernel): every row past the
+    # expert's token count is padding, so the whole MMA + store is wasted work. Saves
+    # the all-padding tiles a skewed histogram leaves in the max_rows-sized grid.
+    if pid_m * BLOCK_M >= valid_rows:
+        return
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
@@ -145,6 +150,15 @@ def grouped_gemm_autotune_kernel(
     pid_n = tile_in_group // group_size_m
 
     valid_rows = tl.load(counts_ptr + expert_id)
+    # Skip fully-invalid tiles: when this tile's first row is already past the
+    # expert's token count, every row is padding, so the whole MMA + store is wasted
+    # work. Early-return saves the entire tile's compute. This is the grouped-GEMM's
+    # core win over a naive padded batched GEMM (which cannot skip padding rows): the
+    # launched grid is sized to the busiest expert (max_rows), so a skewed histogram
+    # leaves many all-padding tiles that the old kernel still ran the full GEMM on.
+    # No-op for the balanced histogram (every expert fills max_rows, no padding tile).
+    if pid_m * BLOCK_M >= valid_rows:
+        return
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
@@ -163,15 +177,36 @@ def grouped_gemm_autotune_kernel(
     )
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for _ in range(0, k_dim, BLOCK_K):
-        mask_a = (offs_m[:, None] < valid_rows) & (offs_k[None, :] < k_dim)
-        mask_b = (offs_k[:, None] < k_dim) & (offs_n[None, :] < n_dim)
-        a = tl.load(a_ptrs, mask=mask_a, other=0.0)
-        b = tl.load(b_ptrs, mask=mask_b, other=0.0)
-        acc += tl.dot(a, b, out_dtype=tl.float32)
-        offs_k += BLOCK_K
-        a_ptrs += BLOCK_K * stride_ak
-        b_ptrs += BLOCK_K * stride_bk
+    # Full-tile fast path: when every row (M) and column (N) of this output tile is
+    # valid, skip the per-iteration 2D boundary masks (Triton predicated loads + the
+    # mask compute), the dominant overhead vs cuBLAS-batched on the common full
+    # (balanced) tiles. Partial edge tiles keep the masked path. Same idea as the
+    # ch07 TMA-copy full-tile fast path.
+    tile_m_full = (pid_m + 1) * BLOCK_M <= valid_rows
+    tile_n_full = (pid_n + 1) * BLOCK_N <= n_dim
+    if tile_m_full and tile_n_full:
+        k_main = (k_dim // BLOCK_K) * BLOCK_K
+        for _ in range(0, k_main, BLOCK_K):
+            a = tl.load(a_ptrs)
+            b = tl.load(b_ptrs)
+            acc += tl.dot(a, b, out_dtype=tl.float32)
+            a_ptrs += BLOCK_K * stride_ak
+            b_ptrs += BLOCK_K * stride_bk
+        if k_main < k_dim:
+            k_tail = (k_main + tl.arange(0, BLOCK_K)) < k_dim
+            a = tl.load(a_ptrs, mask=k_tail[None, :], other=0.0)
+            b = tl.load(b_ptrs, mask=k_tail[:, None], other=0.0)
+            acc += tl.dot(a, b, out_dtype=tl.float32)
+    else:
+        for _ in range(0, k_dim, BLOCK_K):
+            mask_a = (offs_m[:, None] < valid_rows) & (offs_k[None, :] < k_dim)
+            mask_b = (offs_k[:, None] < k_dim) & (offs_n[None, :] < n_dim)
+            a = tl.load(a_ptrs, mask=mask_a, other=0.0)
+            b = tl.load(b_ptrs, mask=mask_b, other=0.0)
+            acc += tl.dot(a, b, out_dtype=tl.float32)
+            offs_k += BLOCK_K
+            a_ptrs += BLOCK_K * stride_ak
+            b_ptrs += BLOCK_K * stride_bk
 
     route_weights = tl.load(
         route_w_ptr + expert_id * stride_wb + offs_m * stride_wm,

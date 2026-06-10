@@ -19,6 +19,9 @@ are in "GB300 validated wins summary" + the SoL bullets (B1-B7) below. Headlines
   tma_copy 39.2% -> 63.7% (1.63x, runtime div/mod -> compile-time shift/mask).
 - Frontier unblock: the sm_103a fix loads the whole tcgen05/TMEM family (blackwell_matmul 126x, MoE
   ladder 41.6x) that was unloadable on Blackwell Ultra.
+- MoE grouped GEMM (Triton): the full_stack + standard grouped kernels now skip all-padding tiles
+  (fully-invalid-tile early-return), 1.40x on a skewed MoE histogram (0.162 -> 0.116 ms, the
+  grouped-GEMM's real win over a naive padded bmm); balanced unchanged, all variants verify-pass (B11).
 - Banked with evidence (forward progress, not dead ends): TMA 2D double-buffer (built + measured -19%,
   occupancy-dominated); ch02 P2P 762 GB/s (~80-85% of the NVLink5 pairwise ceiling, vendor-optimal);
   generic cutlass GEMM (also Sm80 but FP32 underfill-capped at 1024^3).
@@ -129,7 +132,7 @@ Confirmed working on GB300 (Blackwell Ultra) during breakthrough validation:
   `optimized_moe_cuda_graphs` 0.935 ms vs 38.9 ms naive baseline (41.6x);
   `optimized_moe_triton` 17x.
 - `blackwell_gemm_optimizations` grouped GEMM (MoE-relevant): full_stack 0.124 ms
-  vs 0.312 ms baseline (2.5x).
+  vs 0.312 ms baseline (2.5x); skewed-histogram all-padding-tile skip 1.40x (B11).
 - `decode_optimization` ladder: `decode_ultimate` 1.29 ms vs 9.81 ms baseline (7.6x).
 
 Net: the repo's frontier optimizations (tcgen05/TMA GEMM, NVFP4 GEMM, MoE ladder)
@@ -722,6 +725,23 @@ SoL framing (B), measured 2026-06-09:
   rewrite (mask elision / pipelining), not a tile knob. Reverted the unused configs. Lesson: the
   standalone tile/arch/sync levers do NOT transfer to the Python/Triton frontier kernels -- they are a
   genuinely different class needing framework-specific deep work.
+- Kernel (B11, WIN), the deep Triton rewrite B10 flagged, delivered. The grouped GEMM launches a grid
+  sized to the busiest expert (max_rows), so a skewed token histogram leaves many all-padding tiles. The
+  old kernel ran the FULL MMA on those tiles and then masked the store to nothing (pure wasted compute).
+  Two changes to the full_stack autotune kernel + the standard kernel: (1) a fully-invalid-tile
+  early-return (`if pid_m*BLOCK_M >= valid_rows: return`) that skips the whole GEMM on all-padding tiles
+  (this is the grouped-GEMM's reason to exist over a naive padded bmm, which cannot skip padding rows),
+  and (2) a full-tile fast path that drops the per-iteration 2D boundary masks on fully-valid tiles.
+  Same-node matched A/B (80 iters after 8 warmup, valid-row correctness-checked, maxdiff 0.0020 vs the
+  0.35 gate): skewed (pad_frac 0.41, counts 3445/2514/1582/651) 0.162 -> 0.116 ms = 1.40x faster
+  (637.5 -> 891.1 useful-TFLOPS), closing the gap vs cuBLAS-batched torch.bmm-over-padded from 1.845x to
+  1.321x. Balanced (no padding) is neutral (979.7 -> 988.6 TFLOPS: early-return is a correct no-op,
+  full-tile +0.9%), so the default benchmark and its verification are unchanged. All 4 variants
+  (baseline / large_tiles / full_stack / persistent) verify-pass on both histograms. The persistent
+  kernel kept the masked path because this Triton (NGC 26.05) rejects `continue` in the tile loop
+  (`unsupported AST node type: Continue`), so the skip rides on the autotune + standard kernels. Lesson
+  update to B10: the Python/Triton frontier DOES yield to deep framework-specific work, but the lever
+  here is FLOP-elision (skip padding work), not a tile knob.
 
 Patterns (the durable GB300 lessons): (1) comm, reduce or reroute or re-engine the bytes
 (volume-reduction, routing, right-engine win; overlap/backend-swap tie on fast NVLink). (2) kernel,
